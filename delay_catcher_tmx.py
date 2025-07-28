@@ -68,6 +68,18 @@ class AsanaManager:
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS delay_reason_updates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_gid TEXT,
+                old_reason TEXT,
+                new_reason TEXT,
+                update_date TEXT,
+                changed_by TEXT,
+                FOREIGN KEY(task_gid) REFERENCES tasks(gid)
+            )
+        ''')
+
         # ✅ 確保 is_delay 欄位存在（避免初次建立 DB 時缺少該欄位）
         try:
             cursor.execute("ALTER TABLE due_date_updates ADD COLUMN is_delay INTEGER DEFAULT 0")
@@ -156,10 +168,21 @@ class AsanaManager:
         if response.status_code != 200:
             print(f"Failed to update delay count for {task_gid}. Status: {response.status_code}")
 
+    def post_to_sheet(self, payload: Dict):
+        SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycby1A_7VywYfJH6qHuJ_IN9oxUcw3meBsvjXzEMxxfdp1fQC5pzttlBiDZTZJaEzcZtivA/exec"
+        try:
+            requests.post(SHEET_WEBHOOK, json=payload, timeout=5)
+        except Exception as e:
+            print("Sheet webhook error:", e)
+
     def save_tasks_to_db(self, tasks: List[Dict], project_gid: str):
         conn = sqlite3.connect(DB_PATH)
+        conn.execute('PRAGMA journal_mode=WAL')  # 啟用 WAL 模式避免鎖定
         cursor = conn.cursor()
 
+        # 先收集所有需要處理的 delay reason 變更
+        all_delay_reason_changes = []
+        
         for task in tasks:
             task_gid = task['gid']
             assignee_name = task.get('assignee', {}).get('name', 'Unassigned') if task.get('assignee') else 'Unassigned'
@@ -200,9 +223,79 @@ class AsanaManager:
                 custom_fields_json,
                 datetime.now().isoformat()
             ))
+            
+            # 收集 delay reason 變更，但不立即執行資料庫操作
+            delay_changes = self.get_delay_reason_changes(task_gid, task)
+            all_delay_reason_changes.extend(delay_changes)
+
+        # 批次處理所有 delay reason 變更
+        for change in all_delay_reason_changes:
+            cursor.execute('''
+                SELECT COUNT(*) FROM delay_reason_updates 
+                WHERE task_gid = ? AND old_reason = ? AND new_reason = ? AND update_date = ?
+            ''', (change['task_gid'], change['old_reason'], change['new_reason'], change['update_date']))
+            
+            if cursor.fetchone()[0] == 0:  # 如果還沒記錄過
+                cursor.execute('''
+                    INSERT INTO delay_reason_updates
+                    (task_gid, old_reason, new_reason, update_date, changed_by)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (
+                    change['task_gid'], 
+                    change['old_reason'], 
+                    change['new_reason'],
+                    change['update_date'], 
+                    change['changed_by']
+                ))
+                
+                # 發送到 Google Sheets（在資料庫操作完成後）
+                self.post_to_sheet({
+                    "task_gid": change['task_gid'],
+                    "task_name": change['task_name'],
+                    "old_reason": change['old_reason'],
+                    "new_reason": change['new_reason'],
+                    "updated_at": change['update_date'],
+                    "updated_by": change['changed_by']
+                })
 
         conn.commit()
         conn.close()
+
+    def get_delay_reason_changes(self, task_gid: str, task: Dict) -> List[Dict]:
+        """獲取 delay reason 變更，但不直接操作資料庫"""
+        stories = self.get_task_stories(task_gid)
+        changes = []
+        
+        for s in stories:
+            # 安全地檢查 custom_field
+            custom_field = s.get('custom_field')
+            if not custom_field:
+                continue
+                
+            field_name = custom_field.get('name', '')
+            
+            # 檢查是否為 delay reason 的變更
+            if (s.get('resource_subtype') == 'enum_custom_field_changed' and
+                'delay reason' in field_name.lower()):
+
+                # 安全地獲取舊值和新值
+                old_enum_value = s.get('old_enum_value')
+                new_enum_value = s.get('new_enum_value')
+                
+                old_r = old_enum_value.get('name', '') if old_enum_value else ''
+                new_r = new_enum_value.get('name', '') if new_enum_value else ''
+                
+                if old_r != new_r:
+                    changes.append({
+                        'task_gid': task_gid,
+                        'task_name': task['name'],
+                        'old_reason': old_r,
+                        'new_reason': new_r,
+                        'update_date': s.get('created_at', ''),
+                        'changed_by': s.get('created_by', {}).get('name', '') if s.get('created_by') else ''
+                    })
+                        
+        return changes
 
     def analyze_due_on_updates(self, project_gid: str):
         conn = sqlite3.connect(DB_PATH)
@@ -223,6 +316,22 @@ class AsanaManager:
         print(f"\nTotal delayed tasks found: {len(changes)}")
         conn.close()
 
+    def analyze_delay_reason_updates(self, project_gid: str):
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT t.name, d.old_reason, d.new_reason, d.update_date, d.changed_by
+            FROM delay_reason_updates d
+            JOIN tasks t ON d.task_gid = t.gid
+            WHERE t.project_gid = ?
+            ORDER BY d.update_date
+        ''', (project_gid,))
+        rows = cur.fetchall()
+        print("\n=== Delay Reason Changes ===")
+        for n, old, new, dt, by in rows:
+            print(f"- {n}: '{old}' → '{new}' at {dt} by {by}")
+        print(f"\nTotal reason updates: {len(rows)}")
+        conn.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Delay Catcher – Track due_on changes")
@@ -241,22 +350,14 @@ def main():
     choice = int(input("Select a project: ")) - 1
     project_gid = projects[choice]['gid']
 
-#    print("\n1. Update data from Asana")
-#    print("2. Analyze due date delays")
-#    action = input("Choose action (1/2): ").strip()
-
-#    if action == '1':
-#        manager.update_project_data(project_gid)
-#    elif action == '2':
-#        manager.analyze_due_on_updates(project_gid)
-#    else:
-#        print("Invalid choice.")
-
     print("\nAuto-running: Update Asana data...\n")
     manager.update_project_data(project_gid)
 
     print("\nAuto-running: Analyze due date changes...\n")
     manager.analyze_due_on_updates(project_gid)
+
+    print("\nAuto-running: Delay reason analysis...\n")
+    manager.analyze_delay_reason_updates(project_gid)
 
 if __name__ == "__main__":
     main()
