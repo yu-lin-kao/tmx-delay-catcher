@@ -151,6 +151,12 @@ class AsanaManager:
                 return int(field.get('number_value') or 0)
         return 0
 
+    def get_current_delay_reason(self, custom_fields: List[Dict]) -> Optional[str]:
+        for field in custom_fields:
+            if 'delay reason' in field.get('name', '').lower():
+                enum_val = field.get('enum_value')
+                return enum_val.get('name') if enum_val else None
+        return None
 
     def has_delay_reason(self, custom_fields: List[Dict]) -> bool:
         for field in custom_fields:
@@ -223,36 +229,68 @@ class AsanaManager:
 
     def save_tasks_to_db(self, tasks: List[Dict], project_gid: str):
         conn = sqlite3.connect(DB_PATH)
-        conn.execute('PRAGMA journal_mode=WAL')  # 啟用 WAL 模式避免鎖定
+        conn.execute('PRAGMA journal_mode=WAL')
         cursor = conn.cursor()
 
-        # 先收集所有需要處理的 delay reason 變更
+        task_map = {t['gid']: t for t in tasks}
         all_delay_reason_changes = []
-        
+
         for task in tasks:
             task_gid = task['gid']
-            assignee_name = task.get('assignee', {}).get('name', 'Unassigned') if task.get('assignee') else 'Unassigned'
+            assignee = task.get('assignee')
+            assignee_name = assignee['name'] if assignee and 'name' in assignee else 'Unassigned'
             new_due_on = task.get('due_on', '')
-            custom_fields_json = json.dumps(task.get('custom_fields', []))
             custom_fields = task.get('custom_fields', [])
+            custom_fields_json = json.dumps(custom_fields)
 
-            # Track due_on changes only if it's delayed
+            # 檢查舊 due date
             cursor.execute('SELECT due_on FROM tasks WHERE gid = ?', (task_gid,))
             existing = cursor.fetchone()
             old_due_on = existing[0] if existing else ''
 
+            # 判斷是否 delay（延後或取消）
             is_delay = self.is_due_date_delayed(old_due_on, new_due_on)
-            if existing and is_delay:
+
+            if existing and (old_due_on != new_due_on) and is_delay:
+                # 寫入 due_date_updates
                 cursor.execute('''
                     INSERT INTO due_date_updates (task_gid, old_due_on, new_due_on, update_date, is_delay)
                     VALUES (?, ?, ?, ?, ?)
                 ''', (task_gid, old_due_on, new_due_on, datetime.now().isoformat(), 1))
+
+                # Delay Count +1，如果沒有 delay reason，補 "Awaiting identify"
                 self.increment_delay_count(task_gid, custom_fields)
 
+                # 寫入 Google Sheet
+                delay_count = self.get_current_delay_count(custom_fields)
+                cursor.execute('SELECT MIN(old_due_on) FROM due_date_updates WHERE task_gid = ?', (task_gid,))
+                first_due = cursor.fetchone()[0] or ''
+                delay_duration = ''
+                if first_due and new_due_on:
+                    try:
+                        d1 = datetime.fromisoformat(first_due)
+                        d2 = datetime.fromisoformat(new_due_on)
+                        delay_duration = (d2 - d1).days
+                    except:
+                        pass
+
+                self.post_to_sheet({
+                    "task_gid": task_gid,
+                    "task_name": task['name'],
+                    "delay_count": delay_count,
+                    "new_reason": self.get_current_delay_reason(custom_fields) or "Awaiting identify",
+                    "first_due_on": first_due,
+                    "latest_due_on": new_due_on,
+                    "delay_duration": delay_duration,
+                    "updated_at": datetime.now().isoformat(),
+                    "updated_by": assignee_name
+                })
+
+            # 更新 tasks 表（永遠寫入最新狀態）
             cursor.execute('''
                 INSERT OR REPLACE INTO tasks 
                 (gid, name, project_gid, assignee_name, completed, completed_at, created_at, 
-                 modified_at, due_on, notes, permalink_url, custom_fields, last_updated)
+                modified_at, due_on, notes, permalink_url, custom_fields, last_updated)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 task_gid,
@@ -269,19 +307,50 @@ class AsanaManager:
                 custom_fields_json,
                 datetime.now().isoformat()
             ))
-            
-            # 收集 delay reason 變更，但不立即執行資料庫操作
+
+            # 收集 delay reason 更動
             delay_changes = self.get_delay_reason_changes(task_gid, task)
             all_delay_reason_changes.extend(delay_changes)
 
-        # 批次處理所有 delay reason 變更
+        # 處理 delay reason 更動：寫入歷史表 & Google Sheet
         for change in all_delay_reason_changes:
+            # always log to Google Sheet
+            task_obj = task_map.get(change['task_gid'], {})
+            custom_fields = task_obj.get('custom_fields', [])
+            new_due_on = task_obj.get('due_on', '')
+            delay_count = self.get_current_delay_count(custom_fields)
+
+            cursor.execute('SELECT MIN(old_due_on) FROM due_date_updates WHERE task_gid = ?', (change['task_gid'],))
+            first_due = cursor.fetchone()[0] or ''
+            delay_duration = ''
+            if first_due and new_due_on:
+                try:
+                    d1 = datetime.fromisoformat(first_due)
+                    d2 = datetime.fromisoformat(new_due_on)
+                    delay_duration = (d2 - d1).days
+                except:
+                    pass
+
+            self.post_to_sheet({
+                "task_gid": change['task_gid'],
+                "task_name": change['task_name'],
+                "delay_count": delay_count,
+                "new_reason": change['new_reason'],
+                "first_due_on": first_due,
+                "latest_due_on": new_due_on,
+                "delay_duration": delay_duration,
+                "updated_at": change['update_date'],
+                "updated_by": change['changed_by']
+            })
+
+            # 插入歷史紀錄（如果該筆尚未存在）
             cursor.execute('''
                 SELECT COUNT(*) FROM delay_reason_updates 
                 WHERE task_gid = ? AND old_reason = ? AND new_reason = ? AND update_date = ?
             ''', (change['task_gid'], change['old_reason'], change['new_reason'], change['update_date']))
-            
-            if cursor.fetchone()[0] == 0:  # 如果還沒記錄過
+            already_exists = cursor.fetchone()[0] > 0
+
+            if not already_exists:
                 cursor.execute('''
                     INSERT INTO delay_reason_updates
                     (task_gid, old_reason, new_reason, update_date, changed_by)
@@ -293,44 +362,10 @@ class AsanaManager:
                     change['update_date'], 
                     change['changed_by']
                 ))
-                
-                # 發送到 Google Sheets（在資料庫操作完成後）
-                # 取得 delay count
-                delay_count = self.get_current_delay_count(task.get('custom_fields', []))
-
-                # 取得 first due_on
-                cursor.execute('''
-                    SELECT MIN(old_due_on) FROM due_date_updates WHERE task_gid = ?
-                ''', (change['task_gid'],))
-                first_due = cursor.fetchone()[0] or ''
-
-                # 最新 due_on
-                latest_due = task.get('due_on', '')
-                delay_duration = ''
-                if first_due and latest_due:
-                    try:
-                        d1 = datetime.fromisoformat(first_due)
-                        d2 = datetime.fromisoformat(latest_due)
-                        delay_duration = (d2 - d1).days
-                    except Exception:
-                        delay_duration = ''
-
-                # 傳送新 payload
-                self.post_to_sheet({
-                    "task_gid": change['task_gid'],
-                    "task_name": change['task_name'],
-                    "delay_count": delay_count,
-                    "new_reason": change['new_reason'],
-                    "first_due_on": first_due,
-                    "latest_due_on": latest_due,
-                    "delay_duration": delay_duration,
-                    "updated_at": change['update_date'],
-                    "updated_by": change['changed_by']
-                })
-
 
         conn.commit()
         conn.close()
+
 
     def get_delay_reason_changes(self, task_gid: str, task: Dict) -> List[Dict]:
         """獲取 delay reason 變更，但不直接操作資料庫"""
