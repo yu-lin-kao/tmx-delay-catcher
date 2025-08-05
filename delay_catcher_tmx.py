@@ -516,7 +516,7 @@ class AsanaManager:
 
 def main():
     parser = argparse.ArgumentParser(description="Delay Catcher – Track due_on changes")
-    parser.add_argument("--asana-token", required=True)
+    parser.add_argument("--asana-token", default="2/1209849998722634/1210875382450653:f5b83afb3f50841de01007d4e4eb4e05") # Asana Token
     parser.add_argument("--workspace-id", default="1203024903921604")
     args = parser.parse_args()
 
@@ -528,8 +528,10 @@ def main():
     for i, project in enumerate(projects):
         print(f"{i+1}. {project['name']} (Team: {project['team']})")
 
-    choice = int(input("Select a project: ")) - 1
-    project_gid = projects[choice]['gid']
+    # choice = int(input("Select a project: ")) - 1
+    # project_gid = projects[choice]['gid']
+    
+    project_gid = "1206266098908719"
 
     print("\nAuto-running: Update Asana data...\n")
     manager.update_project_data(project_gid)
