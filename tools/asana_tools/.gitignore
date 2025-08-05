@@ -1,3 +1,13 @@
+# Ignore secrets
 .env
-asana_tasks.db
-__pycache__/
+
+# Ignore DB files
+*.db
+*.db-shm
+*.db-wal
+
+# Ignore CSV outputs
+*.csv
+
+# Ignore venv
+.venv/
