@@ -1,4 +1,13 @@
-.env
-*.db
+
+# macOS metadata
 .DS_Store
 
+# Python venv
+venv/
+
+# local DB
+*.db
+
+# dotenv file
+.env
+.env.example

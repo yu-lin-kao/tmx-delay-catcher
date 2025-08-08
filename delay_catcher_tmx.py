@@ -1,7 +1,10 @@
 # delay_catcher_dev.py
-# 🧪 Experimental Asana Script – Due Date Change Tracker
-# Author: Yu-Lin Kao
 # Purpose: Track and analyze due_on changes in Asana tasks, increment Delay Count, and log Delay Reason changes
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 import argparse
 import sqlite3
@@ -230,7 +233,7 @@ class AsanaManager:
             self.set_delay_reason_awaiting(task_gid, custom_fields)
 
     def post_to_sheet(self, payload: Dict):
-        SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbx6UjuCY18B9ZQhcpTAKKQPM0gAilAlERgk4QLEre75KezshUnt61XMyD5rnNdvxc_EBQ/exec"
+        SHEET_WEBHOOK = os.getenv("SHEET_WEBHOOK_URL")
         try:
             requests.post(SHEET_WEBHOOK, json=payload, timeout=5)
         except Exception as e:
@@ -516,8 +519,8 @@ class AsanaManager:
 
 def main():
     parser = argparse.ArgumentParser(description="Delay Catcher – Track due_on changes")
-    parser.add_argument("--asana-token", default="2/1209849998722634/1210875382450653:f5b83afb3f50841de01007d4e4eb4e05") # Asana Token
-    parser.add_argument("--workspace-id", default="1203024903921604")
+    parser.add_argument("--asana-token", default=os.getenv("ASANA_TOKEN")) # Asana Token
+    parser.add_argument("--workspace-id", default=os.getenv("ASANA_WORKSPACE_ID"))
     args = parser.parse_args()
 
     manager = AsanaManager(args.asana_token, args.workspace_id)
@@ -531,7 +534,7 @@ def main():
     # choice = int(input("Select a project: ")) - 1
     # project_gid = projects[choice]['gid']
     
-    project_gid = "1206266098908719"
+    project_gid = os.getenv("ASANA_PROJECT_ID")
 
     print("\nAuto-running: Update Asana data...\n")
     manager.update_project_data(project_gid)
