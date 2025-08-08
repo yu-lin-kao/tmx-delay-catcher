@@ -10,5 +10,4 @@ venv/
 
 # dotenv file
 .env
-.env.example
 __pycache__/

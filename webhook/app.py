@@ -8,6 +8,18 @@ from delay_catcher_tmx import main as run_delay_catcher
 
 app = Flask(__name__)
 
+@app.route("/ping", methods=["GET"])
+def ping():
+    token = request.args.get("token")
+    expected_token = os.getenv("KEEPALIVE_TOKEN")
+    
+    if expected_token and token != expected_token:
+        print(f"❌ Unauthorized ping attempt with token: {token}")
+        return "Unauthorized", 401
+
+    print("📶 UptimeRobot ping received")
+    return "pong", 200
+
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "healthy", "message": "Delay Catcher TMX Webhook is running!"}), 200
