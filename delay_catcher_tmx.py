@@ -306,38 +306,56 @@ class AsanaManager:
 
     def _handle_due_date_delay(self, cursor, task: Dict, task_gid: str, old_due_on: str, new_due_on: str, assignee_name: str, custom_fields: List[Dict]):
         """處理 due date 延後的邏輯"""
+
+        # 🧠 避免重複記錄相同的 due_on 變化
+        cursor.execute('''
+            SELECT COUNT(*) FROM due_date_updates
+            WHERE task_gid = ? AND old_due_on = ? AND new_due_on = ?
+        ''', (task_gid, old_due_on, new_due_on))
+        already_logged = cursor.fetchone()[0]
+
+        if already_logged:
+            if getattr(self, 'debug_mode', False):
+                print(f"⏩ Skipping duplicate due date log: {task['name']} {old_due_on} → {new_due_on}")
+            return
+
         print(f"🔄 Due date delayed for task {task['name']}: {old_due_on} → {new_due_on}")
         
-        # 從 task stories 獲取實際的修改者和修改時間
         modifier_info = self._get_latest_due_date_modifier(task_gid)
-        
-        # A) 更新 DB - 記錄 due date 變更
+
         cursor.execute('''
             INSERT INTO due_date_updates (task_gid, old_due_on, new_due_on, update_date, is_delay)
             VALUES (?, ?, ?, ?, ?)
         ''', (task_gid, old_due_on, new_due_on, modifier_info['updated_at'], 1))
 
-        # 增加 delay count 並設置預設 delay reason
         self.increment_delay_count(task_gid, custom_fields)
-
-        # B) 新增到 Google Spreadsheet
         self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, "due_date_change")
-
+    
     def _handle_delay_reason_change(self, cursor, task: Dict, task_gid: str, old_reason: str, new_reason: str, assignee_name: str):
         """處理 delay reason 變更的邏輯"""
+
+        # 🧠 避免重複記錄相同的變化
+        cursor.execute('''
+            SELECT COUNT(*) FROM delay_reason_updates
+            WHERE task_gid = ? AND old_reason = ? AND new_reason = ?
+        ''', (task_gid, old_reason, new_reason))
+        already_logged = cursor.fetchone()[0]
+
+        if already_logged:
+            if getattr(self, 'debug_mode', False):
+                print(f"⏩ Skipping duplicate delay reason log: {task['name']} {old_reason} → {new_reason}")
+            return
+
         print(f"🔄 Delay reason changed for task {task['name']}: '{old_reason}' → '{new_reason}'")
         
-        # 從 task stories 獲取實際的修改者和修改時間
         modifier_info = self._get_latest_delay_reason_modifier(task_gid, new_reason)
-        
-        # A) 更新 DB - 記錄 delay reason 變更
+
         cursor.execute('''
             INSERT INTO delay_reason_updates 
             (task_gid, old_reason, new_reason, update_date, changed_by)
             VALUES (?, ?, ?, ?, ?)
         ''', (task_gid, old_reason, new_reason, modifier_info['updated_at'], modifier_info['updated_by']))
 
-        # B) 新增到 Google Spreadsheet
         self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, "delay_reason_change")
 
     def _log_to_spreadsheet(self, cursor, task: Dict, task_gid: str, modifier_info: Dict, change_type: str):
