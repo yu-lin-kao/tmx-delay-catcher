@@ -20,4 +20,7 @@ COPY . .
 EXPOSE 8080
 
 # 啟動應用程式
-CMD ["python", "app.py"]
+CMD ["python", "webhook/app.py"]
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONIOENCODING=UTF-8

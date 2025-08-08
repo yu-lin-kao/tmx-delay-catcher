@@ -1,6 +1,9 @@
 #app.py
 
 from flask import Flask, request, jsonify, make_response
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from delay_catcher_tmx import main as run_delay_catcher
 
 app = Flask(__name__)
