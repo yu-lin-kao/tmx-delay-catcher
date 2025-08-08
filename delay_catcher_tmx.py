@@ -106,10 +106,9 @@ class AsanaManager:
 
     def get_project_tasks(self, project_gid: str) -> List[Dict]:
         params = {
-            "project": project_gid,
             "opt_fields": "gid,name,assignee.name,completed,completed_at,created_at,modified_at,due_on,notes,permalink_url,custom_fields"
         }
-        response = requests.get(f"{BASE_URL}/tasks", headers=self.headers, params=params)
+        response = requests.get(f"{BASE_URL}/projects/{project_gid}/tasks", headers=self.headers, params=params)
         if response.status_code == 200:
             return response.json()['data']
         else:
