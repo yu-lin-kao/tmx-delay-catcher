@@ -9,7 +9,7 @@ load_dotenv()
 
 ASANA_TOKEN = os.getenv("ASANA_TOKEN")
 PROJECT_GID = os.getenv("ASANA_TMX_PROJECT_ID")
-WEBHOOK_URL = "https://delay-catcher-tmx.fly.dev/webhook"
+WEBHOOK_URL = "https://delay-catcher-tmx.fly.dev/ping?token=es111"
 WORKSPACE_GID = "1203024903921604"  # 從 workspace_check.py 得到的工作區 GID
 
 headers = {
