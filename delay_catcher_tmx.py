@@ -534,7 +534,7 @@ def main():
     # choice = int(input("Select a project: ")) - 1
     # project_gid = projects[choice]['gid']
     
-    project_gid = os.getenv("ASANA_PROJECT_ID")
+    project_gid = os.getenv("ASANA_TMX_PROJECT_ID")
 
     print("\nAuto-running: Update Asana data...\n")
     manager.update_project_data(project_gid)

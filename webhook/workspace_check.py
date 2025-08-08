@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ASANA_TOKEN = os.getenv("ASANA_TOKEN")
-PROJECT_GID = os.getenv("ASANA_PROJECT_ID")
+PROJECT_GID = os.getenv("ASANA_TMX_PROJECT_ID")
 
 headers = {
     "Authorization": f"Bearer {ASANA_TOKEN}",
