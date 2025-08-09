@@ -7,6 +7,11 @@ DEBOUNCE_SEC = float(os.getenv("DEBOUNCE_SEC", "1.5"))  # 可用 .env 覆寫，�
 _fire_timer = None   # 全域計時器
 _fire_lock = Lock()  # 保護計時器的鎖
 
+# ✅ 加入去重相關的全域變數
+_last_run_time = 0
+MIN_INTERVAL_SEC = 10  # 最短間隔10秒，避免重複執行
+_pending_tasks = set()  # 待處理的任務 GID
+
 ASANA_TOKEN  = os.getenv("ASANA_TOKEN")
 PROJECT_GID  = os.getenv("ASANA_TMX_PROJECT_ID")
 DB_PATH      = os.getenv("EVENTS_DB_PATH", "asana_events.db")
@@ -81,18 +86,37 @@ def is_relevant(ev):
     return False
 
 def _do_run():
-    """Debounce 計時到時，真的執行你的主流程。"""
+    """Debounce 計時到時，真的執行你的主流程。加入去重檢查。"""
+    global _last_run_time, _pending_tasks
+    current_time = time.time()
+    
+    # ✅ 檢查是否太快重複執行
+    if current_time - _last_run_time < MIN_INTERVAL_SEC:
+        print(f"⏱️ Too soon since last run ({current_time - _last_run_time:.1f}s), skipping")
+        return
+    
     try:
-        print("⏱️ Debounce elapsed, executing delay_catcher_tmx…")
+        _last_run_time = current_time
+        pending_copy = _pending_tasks.copy()
+        _pending_tasks.clear()  # 清空待處理列表
+        
+        print(f"⏱️ Debounce elapsed, executing delay_catcher_tmx for tasks: {list(pending_copy)}")
         run_delay_catcher()
         print("✅ delay_catcher_tmx executed (debounced)")
     except Exception as e:
         print("❌ Error in debounced run:", e)
+        traceback.print_exc()
 
-def schedule_run():
+def schedule_run(task_gids=None):
     """在 DEBOUNCE_SEC 後執行；若期間又有事件，重置計時。"""
-    global _fire_timer
+    global _fire_timer, _pending_tasks
+    
     with _fire_lock:
+        # ✅ 收集待處理的任務
+        if task_gids:
+            _pending_tasks.update(task_gids)
+            print(f"🎯 Added to pending tasks: {task_gids}, total pending: {list(_pending_tasks)}")
+        
         if _fire_timer:
             _fire_timer.cancel()   # 先取消上一個排程
         _fire_timer = Timer(DEBOUNCE_SEC, _do_run)
@@ -131,11 +155,13 @@ def main():
 
             picked = [e for e in events if is_relevant(e)]
             if picked:
-                gids  = [e.get("resource", {}).get("gid") for e in picked]
+                # ✅ 收集所有相關任務的 GID
+                gids = [e.get("resource", {}).get("gid") for e in picked if e.get("resource", {}).get("gid")]
                 kinds = [(e.get("change") or {}).get("field") for e in picked]
                 print(f"🎯 Relevant events -> tasks: {gids} fields: {kinds}")
-                # ✅ 改成排程執行（debounce），把同一波連續修改合併處理
-                schedule_run()
+                
+                # ✅ 傳入任務 GID 到 debounce 機制
+                schedule_run(task_gids=gids)
         except requests.RequestException as e:
             print("🌧️ Network/API error:", e)
             time.sleep(2)
@@ -146,4 +172,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
