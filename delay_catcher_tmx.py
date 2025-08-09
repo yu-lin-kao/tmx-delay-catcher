@@ -242,11 +242,9 @@ class AsanaManager:
         conn = sqlite3.connect(DB_PATH)
         conn.execute('PRAGMA journal_mode=WAL')
         cursor = conn.cursor()
-        
-        current_run_time = datetime.now().isoformat()
 
         for task in tasks:
-            task_gid = task['gid']
+            task_gid = str(task['gid'])  # 🔧 確保 task_gid 是字串格式
             assignee = task.get('assignee')
             assignee_name = assignee['name'] if assignee and 'name' in assignee else 'Unassigned'
             new_due_on = task.get('due_on', '')
@@ -256,87 +254,32 @@ class AsanaManager:
             # 獲取當前的 delay reason
             current_delay_reason = self.get_current_delay_reason(custom_fields)
 
-            # ===== 獲取上次處理時間 =====
-            cursor.execute('SELECT due_on, custom_fields, last_updated FROM tasks WHERE gid = ?', (task_gid,))
+            # ===== 檢查舊資料 =====
+            cursor.execute('SELECT due_on, custom_fields FROM tasks WHERE gid = ?', (task_gid,))
             existing = cursor.fetchone()
+            old_due_on = existing[0] if existing else ''
+            old_custom_fields_json = existing[1] if existing else ''
             
-            last_processed_time = datetime.min
-            if existing and existing[2]:  # last_updated exists
+            # 解析舊的 delay reason
+            old_delay_reason = ""
+            if old_custom_fields_json:
                 try:
-                    last_processed_time = datetime.fromisoformat(existing[2])
-                except:
-                    pass
-
-            # ===== 1. 檢查 due_on 變更（基於 Asana Stories 的真實時間） =====
-            if existing:
-                old_due_on = existing[0] if existing[0] else ''
-                
-                # 只有當 due_on 真的不同時才檢查
-                if old_due_on != new_due_on and self.is_due_date_delayed(old_due_on, new_due_on):
-                    # 🔍 檢查這個變更是否在上次處理之後發生
-                    if self._is_due_date_change_after_last_update(task_gid, old_due_on, new_due_on, last_processed_time):
-                        print(f"🔄 New due date delay detected for {task['name']}: {old_due_on} → {new_due_on}")
-                        
-                        modifier_info = self._get_latest_due_date_modifier(task_gid)
-                        
-                        # 檢查是否已經記錄過這個特定的變更
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM due_date_updates
-                            WHERE task_gid = ? AND old_due_on = ? AND new_due_on = ?
-                        ''', (task_gid, old_due_on, new_due_on))
-                        
-                        if cursor.fetchone()[0] == 0:  # 沒有記錄過
-                            cursor.execute('''
-                                INSERT INTO due_date_updates (task_gid, old_due_on, new_due_on, update_date, is_delay)
-                                VALUES (?, ?, ?, ?, ?)
-                            ''', (task_gid, old_due_on, new_due_on, modifier_info['updated_at'], 1))
-                            
-                            self.increment_delay_count(task_gid, custom_fields)
-                            
-                            # 重新獲取更新後的資料
-                            updated_task = self.get_task_by_gid(task_gid)
-                            if updated_task:
-                                updated_fields = updated_task.get('custom_fields', [])
-                                self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, "due_date_change", updated_fields)
-                    else:
-                        print(f"⏩ Due date change for {task['name']} already processed (before {last_processed_time})")
-
-            # ===== 2. 檢查 delay reason 變更（基於 Asana Stories 的真實時間） =====
-            if existing and existing[1]:  # custom_fields exists
-                try:
-                    old_custom_fields = json.loads(existing[1])
+                    old_custom_fields = json.loads(old_custom_fields_json)
                     old_delay_reason = self.get_current_delay_reason(old_custom_fields) or ""
                 except:
                     old_delay_reason = ""
-                
-                current_delay_reason_clean = current_delay_reason or ""
-                
-                # 只有當 delay reason 真的不同時才檢查
-                if old_delay_reason != current_delay_reason_clean and current_delay_reason_clean:
-                    # 🔍 檢查這個變更是否在上次處理之後發生
-                    if self._is_delay_reason_change_after_last_update(task_gid, current_delay_reason_clean, last_processed_time):
-                        print(f"🔄 New delay reason change detected for {task['name']}: '{old_delay_reason}' → '{current_delay_reason_clean}'")
-                        
-                        modifier_info = self._get_latest_delay_reason_modifier(task_gid, current_delay_reason_clean)
-                        
-                        # 檢查是否已經記錄過這個特定的變更
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM delay_reason_updates
-                            WHERE task_gid = ? AND old_reason = ? AND new_reason = ?
-                        ''', (task_gid, old_delay_reason, current_delay_reason_clean))
-                        
-                        if cursor.fetchone()[0] == 0:  # 沒有記錄過
-                            cursor.execute('''
-                                INSERT INTO delay_reason_updates 
-                                (task_gid, old_reason, new_reason, update_date, changed_by)
-                                VALUES (?, ?, ?, ?, ?)
-                            ''', (task_gid, old_delay_reason, current_delay_reason_clean, modifier_info['updated_at'], modifier_info['updated_by']))
-                            
-                            self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, "delay_reason_change", custom_fields)
-                    else:
-                        print(f"⏩ Delay reason change for {task['name']} already processed (before {last_processed_time})")
 
-            # ===== 3. 更新 task 資料（使用當前執行時間作為 last_updated） =====
+            # ===== 標記是否有變更 =====
+            due_date_changed = old_due_on != new_due_on and self.is_due_date_delayed(old_due_on, new_due_on)
+            delay_reason_changed = old_delay_reason != (current_delay_reason or "") and current_delay_reason
+            
+            # ===== 處理變更（合併邏輯） =====
+            if due_date_changed or delay_reason_changed:
+                self._handle_combined_changes(cursor, task, task_gid, old_due_on, new_due_on, 
+                                            old_delay_reason, current_delay_reason, assignee_name, 
+                                            custom_fields, due_date_changed, delay_reason_changed)
+
+            # ===== 更新或插入 task 資料 =====
             cursor.execute('''
                 INSERT OR REPLACE INTO tasks 
                 (gid, name, project_gid, assignee_name, completed, completed_at, created_at, 
@@ -355,101 +298,71 @@ class AsanaManager:
                 task.get('notes', ''),
                 task.get('permalink_url', ''),
                 custom_fields_json,
-                current_run_time  # 🔑 關鍵：使用當前執行時間
+                datetime.now().isoformat()
             ))
 
         conn.commit()
         conn.close()
 
-    def _is_due_date_change_after_last_update(self, task_gid: str, old_due_on: str, new_due_on: str, last_processed_time: datetime) -> bool:
-        """檢查 due date 變更是否在上次處理之後發生"""
-        stories = self.get_task_stories(task_gid)
+    def _handle_combined_changes(self, cursor, task: Dict, task_gid: str, old_due_on: str, new_due_on: str, 
+                               old_delay_reason: str, new_delay_reason: str, assignee_name: str, 
+                               custom_fields: List[Dict], due_date_changed: bool, delay_reason_changed: bool):
+        """統一處理 due date 和 delay reason 的變更"""
         
-        for story in sorted(stories, key=lambda x: x.get('created_at', ''), reverse=True):
-            if story.get('resource_subtype') == 'due_date_changed':
-                try:
-                    story_time = datetime.fromisoformat(story.get('created_at', '').replace('Z', '+00:00'))
-                    # 如果這個變更在上次處理之後發生，就是新的變更
-                    if story_time > last_processed_time:
-                        return True
-                except:
-                    continue
+        change_types = []
         
-        return False
+        # ===== 1. 處理 due date 變更 =====
+        if due_date_changed:
+            # 避免重複記錄相同的 due_on 變化
+            cursor.execute('''
+                SELECT COUNT(*) FROM due_date_updates
+                WHERE task_gid = ? AND old_due_on = ? AND new_due_on = ?
+            ''', (task_gid, old_due_on, new_due_on))
+            already_logged = cursor.fetchone()[0]
 
-    def _is_delay_reason_change_after_last_update(self, task_gid: str, new_reason: str, last_processed_time: datetime) -> bool:
-        """檢查 delay reason 變更是否在上次處理之後發生"""
-        stories = self.get_task_stories(task_gid)
-        
-        for story in sorted(stories, key=lambda x: x.get('created_at', ''), reverse=True):
-            if (story.get('resource_subtype') == 'enum_custom_field_changed' and 
-                story.get('custom_field', {}).get('name', '').lower().find('delay reason') != -1):
+            if not already_logged:
+                print(f"🔄 Due date delayed for task {task['name']}: {old_due_on} → {new_due_on}")
                 
-                new_enum = story.get('new_enum_value', {})
-                if new_enum and new_enum.get('name') == new_reason:
-                    try:
-                        story_time = datetime.fromisoformat(story.get('created_at', '').replace('Z', '+00:00'))
-                        # 如果這個變更在上次處理之後發生，就是新的變更
-                        if story_time > last_processed_time:
-                            return True
-                    except:
-                        continue
-        
-        return False
+                modifier_info = self._get_latest_due_date_modifier(task_gid)
+                cursor.execute('''
+                    INSERT INTO due_date_updates (task_gid, old_due_on, new_due_on, update_date, is_delay)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (task_gid, old_due_on, new_due_on, modifier_info['updated_at'], 1))
 
-    def _handle_due_date_delay(self, cursor, task: Dict, task_gid: str, old_due_on: str, new_due_on: str, assignee_name: str, custom_fields: List[Dict]):
-        """處理 due date 延後的邏輯"""
+                self.increment_delay_count(task_gid, custom_fields)
+                change_types.append("due_date_change")
 
-        # 🧠 避免重複記錄相同的 due_on 變化
-        cursor.execute('''
-            SELECT COUNT(*) FROM due_date_updates
-            WHERE task_gid = ? AND old_due_on = ? AND new_due_on = ?
-        ''', (task_gid, old_due_on, new_due_on))
-        already_logged = cursor.fetchone()[0]
+        # ===== 2. 處理 delay reason 變更 =====
+        if delay_reason_changed:
+            # 避免重複記錄相同的變化
+            cursor.execute('''
+                SELECT COUNT(*) FROM delay_reason_updates
+                WHERE task_gid = ? AND old_reason = ? AND new_reason = ?
+            ''', (task_gid, old_delay_reason, new_delay_reason))
+            already_logged = cursor.fetchone()[0]
 
-        if already_logged:
-            if getattr(self, 'debug_mode', False):
-                print(f"⏩ Skipping duplicate due date log: {task['name']} {old_due_on} → {new_due_on}")
-            return
+            if not already_logged:
+                print(f"🔄 Delay reason changed for task {task['name']}: '{old_delay_reason}' → '{new_delay_reason}'")
+                
+                modifier_info = self._get_latest_delay_reason_modifier(task_gid, new_delay_reason)
+                cursor.execute('''
+                    INSERT INTO delay_reason_updates 
+                    (task_gid, old_reason, new_reason, update_date, changed_by)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (task_gid, old_delay_reason, new_delay_reason, modifier_info['updated_at'], modifier_info['updated_by']))
 
-        print(f"🔄 Due date delayed for task {task['name']}: {old_due_on} → {new_due_on}")
-        
-        modifier_info = self._get_latest_due_date_modifier(task_gid)
+                change_types.append("delay_reason_change")
 
-        cursor.execute('''
-            INSERT INTO due_date_updates (task_gid, old_due_on, new_due_on, update_date, is_delay)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (task_gid, old_due_on, new_due_on, modifier_info['updated_at'], 1))
-
-        self.increment_delay_count(task_gid, custom_fields)
-        self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, "due_date_change")
-    
-    def _handle_delay_reason_change(self, cursor, task: Dict, task_gid: str, old_reason: str, new_reason: str, assignee_name: str):
-        """處理 delay reason 變更的邏輯"""
-
-        # 🧠 避免重複記錄相同的變化
-        cursor.execute('''
-            SELECT COUNT(*) FROM delay_reason_updates
-            WHERE task_gid = ? AND old_reason = ? AND new_reason = ?
-        ''', (task_gid, old_reason, new_reason))
-        already_logged = cursor.fetchone()[0]
-
-        if already_logged:
-            if getattr(self, 'debug_mode', False):
-                print(f"⏩ Skipping duplicate delay reason log: {task['name']} {old_reason} → {new_reason}")
-            return
-
-        print(f"🔄 Delay reason changed for task {task['name']}: '{old_reason}' → '{new_reason}'")
-        
-        modifier_info = self._get_latest_delay_reason_modifier(task_gid, new_reason)
-
-        cursor.execute('''
-            INSERT INTO delay_reason_updates 
-            (task_gid, old_reason, new_reason, update_date, changed_by)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (task_gid, old_reason, new_reason, modifier_info['updated_at'], modifier_info['updated_by']))
-
-        self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, "delay_reason_change")
+        # ===== 3. 記錄到 Spreadsheet（合併成一條） =====
+        if change_types:
+            # 優先使用 delay reason 的 modifier_info，如果沒有則使用 due date 的
+            if delay_reason_changed:
+                modifier_info = self._get_latest_delay_reason_modifier(task_gid, new_delay_reason)
+            else:
+                modifier_info = self._get_latest_due_date_modifier(task_gid)
+            
+            combined_change_type = "+".join(change_types)
+            self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, combined_change_type)
 
     def _log_to_spreadsheet(self, cursor, task: Dict, task_gid: str, modifier_info: Dict, change_type: str):
         """統一的 Google Spreadsheet 記錄邏輯"""
@@ -480,18 +393,18 @@ class AsanaManager:
             except Exception as e:
                 print(f"⚠️ Error calculating delay duration: {e}")
 
-        # 發送到 Google Spreadsheet
+        # 🔧 確保所有數據格式正確，並解決 Excel 科學記號問題
         payload = {
-            "task_gid": task_gid,
-            "task_name": task['name'],
-            "delay_count": delay_count,
-            "new_reason": current_delay_reason,
-            "first_due_on": first_due_on,
-            "latest_due_on": latest_due_on,
-            "delay_duration": delay_duration,
-            "updated_at": modifier_info['updated_at'],  # Asana 的修改時間
-            "updated_by": modifier_info['updated_by'],  # 實際修改的人
-            "change_type": change_type  # 標記是什麼類型的變更
+            "task_gid": f"'{task_gid}",  # 🚨 前置單引號強制 Excel 視為文字
+            "task_name": str(task['name']),
+            "delay_count": int(delay_count),  # 確保是整數
+            "new_reason": str(current_delay_reason),
+            "first_due_on": str(first_due_on),
+            "latest_due_on": str(latest_due_on),
+            "delay_duration": int(delay_duration) if delay_duration != '' else '',  # 確保是整數或空字串
+            "updated_at": str(modifier_info['updated_at']),
+            "updated_by": str(modifier_info['updated_by']),
+            "change_type": str(change_type)
         }
         
         self.post_to_sheet(payload)
@@ -510,10 +423,19 @@ class AsanaManager:
                     'updated_by': created_by.get('name', 'Unknown') if created_by else 'Unknown'
                 }
         
-        # 如果找不到 due date 變更記錄，使用 task 的 modified_at
+        # 🔧 如果找不到 due date 變更記錄，嘗試從 task 本身獲取修改者資訊
+        task_response = requests.get(f"{BASE_URL}/tasks/{task_gid}?opt_fields=modified_at,modified_by.name", headers=self.headers)
+        if task_response.status_code == 200:
+            task_data = task_response.json().get('data', {})
+            modified_by = task_data.get('modified_by', {})
+            return {
+                'updated_at': task_data.get('modified_at', datetime.now().isoformat()),
+                'updated_by': modified_by.get('name', 'Unknown') if modified_by else 'Unknown'
+            }
+        
         return {
             'updated_at': datetime.now().isoformat(),
-            'updated_by': 'System'
+            'updated_by': 'Unknown'
         }
 
     def _get_latest_delay_reason_modifier(self, task_gid: str, new_reason: str) -> Dict[str, str]:
@@ -533,12 +455,20 @@ class AsanaManager:
                         'updated_by': created_by.get('name', 'Unknown') if created_by else 'Unknown'
                     }
         
-        # 如果找不到對應的變更記錄，使用當前時間
+        # 🔧 如果找不到對應的變更記錄，嘗試從 task 本身獲取修改者資訊
+        task_response = requests.get(f"{BASE_URL}/tasks/{task_gid}?opt_fields=modified_at,modified_by.name", headers=self.headers)
+        if task_response.status_code == 200:
+            task_data = task_response.json().get('data', {})
+            modified_by = task_data.get('modified_by', {})
+            return {
+                'updated_at': task_data.get('modified_at', datetime.now().isoformat()),
+                'updated_by': modified_by.get('name', 'Unknown') if modified_by else 'Unknown'
+            }
+            
         return {
             'updated_at': datetime.now().isoformat(),
-            'updated_by': 'System'
+            'updated_by': 'Unknown'
         }
-
 
     def get_delay_reason_changes(self, task_gid: str, task: Dict) -> List[Dict]:
         stories = self.get_task_stories(task_gid)
@@ -581,7 +511,7 @@ class AsanaManager:
 
                 if old_r != new_r:
                     changes.append({
-                        'task_gid': task_gid,
+                        'task_gid': f"'{task_gid}",  # 🔧 前置單引號解決 Excel 格式問題
                         'task_name': task['name'],
                         'old_reason': old_r,
                         'new_reason': new_r,
