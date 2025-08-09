@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 import os, time, requests, sqlite3, traceback
 from delay_catcher_tmx import main as run_delay_catcher  # 你原來的主處理
+from threading import Timer, Lock
+
+DEBOUNCE_SEC = float(os.getenv("DEBOUNCE_SEC", "1.5"))  # 可用 .env 覆寫，預設 1.5 秒
+_fire_timer = None   # 全域計時器
+_fire_lock = Lock()  # 保護計時器的鎖
 
 ASANA_TOKEN  = os.getenv("ASANA_TOKEN")
 PROJECT_GID  = os.getenv("ASANA_TMX_PROJECT_ID")
@@ -28,17 +33,24 @@ def set_sync(conn, token):
     conn.commit()
 
 def fetch_events(conn, sync_token=None):
-    """
-    參考 Asana Events API：第一次沒有 sync 會取得初始 token；
-    之後用 sync 進行長輪詢。412 代表 token 過期，需要重置。
-    """
     url = "https://app.asana.com/api/1.0/events"
     params = {"resource": PROJECT_GID, "timeout": POLL_TIMEOUT}
     if sync_token:
         params["sync"] = sync_token
+
     r = requests.get(url, headers=HEADERS, params=params, timeout=POLL_TIMEOUT + 10)
 
+    # ✅ 關鍵修正：第一次/過期時 412，回應 body 會附上新的 sync token
     if r.status_code == 412:
+        try:
+            payload = r.json()
+            new_sync = payload.get("sync")
+            if new_sync:
+                set_sync(conn, new_sync)   # 存起來
+                return [], new_sync, None  # 沒事件很正常，拿到 token 即可
+        except Exception:
+            pass
+        # 萬一沒有拿到（理論上不會），再要求重置
         return [], None, "RESET"
 
     r.raise_for_status()
@@ -68,6 +80,25 @@ def is_relevant(ev):
             return True
     return False
 
+def _do_run():
+    """Debounce 計時到時，真的執行你的主流程。"""
+    try:
+        print("⏱️ Debounce elapsed, executing delay_catcher_tmx…")
+        run_delay_catcher()
+        print("✅ delay_catcher_tmx executed (debounced)")
+    except Exception as e:
+        print("❌ Error in debounced run:", e)
+
+def schedule_run():
+    """在 DEBOUNCE_SEC 後執行；若期間又有事件，重置計時。"""
+    global _fire_timer
+    with _fire_lock:
+        if _fire_timer:
+            _fire_timer.cancel()   # 先取消上一個排程
+        _fire_timer = Timer(DEBOUNCE_SEC, _do_run)
+        _fire_timer.daemon = True  # 不阻擋程式關閉
+        _fire_timer.start()
+
 def main():
     if not ASANA_TOKEN or not PROJECT_GID:
         raise RuntimeError("ASANA_TOKEN / ASANA_TMX_PROJECT_ID 未設定")
@@ -79,6 +110,10 @@ def main():
     while True:
         try:
             events, new_sync, flag = fetch_events(conn, sync_token)
+            if new_sync and new_sync != sync_token:
+                set_sync(conn, new_sync)   # 寫回 DB
+                sync_token = new_sync      # 更新記憶體中的 token
+
             if flag == "RESET":
                 print("⚠️  Sync token reset by server. Restarting stream…")
                 sync_token = None
@@ -96,12 +131,11 @@ def main():
 
             picked = [e for e in events if is_relevant(e)]
             if picked:
-                gids = [e.get("resource", {}).get("gid") for e in picked]
-                kinds = [ (e.get('change') or {}).get('field') for e in picked ]
+                gids  = [e.get("resource", {}).get("gid") for e in picked]
+                kinds = [(e.get("change") or {}).get("field") for e in picked]
                 print(f"🎯 Relevant events -> tasks: {gids} fields: {kinds}")
-                # 觸發你的主流程（建議在主流程內打印：task 名稱、old/new due、Delay Count +1 等）
-                run_delay_catcher()
-                print("✅ delay_catcher_tmx executed after events")
+                # ✅ 改成排程執行（debounce），把同一波連續修改合併處理
+                schedule_run()
         except requests.RequestException as e:
             print("🌧️ Network/API error:", e)
             time.sleep(2)
