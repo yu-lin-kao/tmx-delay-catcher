@@ -242,6 +242,8 @@ class AsanaManager:
         conn = sqlite3.connect(DB_PATH)
         conn.execute('PRAGMA journal_mode=WAL')
         cursor = conn.cursor()
+        
+        current_run_time = datetime.now().isoformat()
 
         for task in tasks:
             task_gid = task['gid']
@@ -254,32 +256,87 @@ class AsanaManager:
             # 獲取當前的 delay reason
             current_delay_reason = self.get_current_delay_reason(custom_fields)
 
-            # ===== 1. 檢查並處理 due_on 變更 =====
-            cursor.execute('SELECT due_on FROM tasks WHERE gid = ?', (task_gid,))
+            # ===== 獲取上次處理時間 =====
+            cursor.execute('SELECT due_on, custom_fields, last_updated FROM tasks WHERE gid = ?', (task_gid,))
             existing = cursor.fetchone()
-            old_due_on = existing[0] if existing else ''
-
-            # 只處理延後或取消的情況
-            if old_due_on != new_due_on and self.is_due_date_delayed(old_due_on, new_due_on):
-                self._handle_due_date_delay(cursor, task, task_gid, old_due_on, new_due_on, assignee_name, custom_fields)
-
-            # ===== 2. 檢查並處理 delay reason 變更 =====
-            cursor.execute('SELECT custom_fields FROM tasks WHERE gid = ?', (task_gid,))
-            existing_task = cursor.fetchone()
-            old_delay_reason = ""
             
-            if existing_task and existing_task[0]:
+            last_processed_time = datetime.min
+            if existing and existing[2]:  # last_updated exists
                 try:
-                    old_custom_fields = json.loads(existing_task[0])
+                    last_processed_time = datetime.fromisoformat(existing[2])
+                except:
+                    pass
+
+            # ===== 1. 檢查 due_on 變更（基於 Asana Stories 的真實時間） =====
+            if existing:
+                old_due_on = existing[0] if existing[0] else ''
+                
+                # 只有當 due_on 真的不同時才檢查
+                if old_due_on != new_due_on and self.is_due_date_delayed(old_due_on, new_due_on):
+                    # 🔍 檢查這個變更是否在上次處理之後發生
+                    if self._is_due_date_change_after_last_update(task_gid, old_due_on, new_due_on, last_processed_time):
+                        print(f"🔄 New due date delay detected for {task['name']}: {old_due_on} → {new_due_on}")
+                        
+                        modifier_info = self._get_latest_due_date_modifier(task_gid)
+                        
+                        # 檢查是否已經記錄過這個特定的變更
+                        cursor.execute('''
+                            SELECT COUNT(*) FROM due_date_updates
+                            WHERE task_gid = ? AND old_due_on = ? AND new_due_on = ?
+                        ''', (task_gid, old_due_on, new_due_on))
+                        
+                        if cursor.fetchone()[0] == 0:  # 沒有記錄過
+                            cursor.execute('''
+                                INSERT INTO due_date_updates (task_gid, old_due_on, new_due_on, update_date, is_delay)
+                                VALUES (?, ?, ?, ?, ?)
+                            ''', (task_gid, old_due_on, new_due_on, modifier_info['updated_at'], 1))
+                            
+                            self.increment_delay_count(task_gid, custom_fields)
+                            
+                            # 重新獲取更新後的資料
+                            updated_task = self.get_task_by_gid(task_gid)
+                            if updated_task:
+                                updated_fields = updated_task.get('custom_fields', [])
+                                self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, "due_date_change", updated_fields)
+                    else:
+                        print(f"⏩ Due date change for {task['name']} already processed (before {last_processed_time})")
+
+            # ===== 2. 檢查 delay reason 變更（基於 Asana Stories 的真實時間） =====
+            if existing and existing[1]:  # custom_fields exists
+                try:
+                    old_custom_fields = json.loads(existing[1])
                     old_delay_reason = self.get_current_delay_reason(old_custom_fields) or ""
                 except:
                     old_delay_reason = ""
+                
+                current_delay_reason_clean = current_delay_reason or ""
+                
+                # 只有當 delay reason 真的不同時才檢查
+                if old_delay_reason != current_delay_reason_clean and current_delay_reason_clean:
+                    # 🔍 檢查這個變更是否在上次處理之後發生
+                    if self._is_delay_reason_change_after_last_update(task_gid, current_delay_reason_clean, last_processed_time):
+                        print(f"🔄 New delay reason change detected for {task['name']}: '{old_delay_reason}' → '{current_delay_reason_clean}'")
+                        
+                        modifier_info = self._get_latest_delay_reason_modifier(task_gid, current_delay_reason_clean)
+                        
+                        # 檢查是否已經記錄過這個特定的變更
+                        cursor.execute('''
+                            SELECT COUNT(*) FROM delay_reason_updates
+                            WHERE task_gid = ? AND old_reason = ? AND new_reason = ?
+                        ''', (task_gid, old_delay_reason, current_delay_reason_clean))
+                        
+                        if cursor.fetchone()[0] == 0:  # 沒有記錄過
+                            cursor.execute('''
+                                INSERT INTO delay_reason_updates 
+                                (task_gid, old_reason, new_reason, update_date, changed_by)
+                                VALUES (?, ?, ?, ?, ?)
+                            ''', (task_gid, old_delay_reason, current_delay_reason_clean, modifier_info['updated_at'], modifier_info['updated_by']))
+                            
+                            self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, "delay_reason_change", custom_fields)
+                    else:
+                        print(f"⏩ Delay reason change for {task['name']} already processed (before {last_processed_time})")
 
-            # 只有當 delay reason 真的有變化時才處理
-            if old_delay_reason != (current_delay_reason or "") and current_delay_reason:
-                self._handle_delay_reason_change(cursor, task, task_gid, old_delay_reason, current_delay_reason, assignee_name)
-
-            # ===== 3. 更新或插入 task 資料 =====
+            # ===== 3. 更新 task 資料（使用當前執行時間作為 last_updated） =====
             cursor.execute('''
                 INSERT OR REPLACE INTO tasks 
                 (gid, name, project_gid, assignee_name, completed, completed_at, created_at, 
@@ -298,11 +355,47 @@ class AsanaManager:
                 task.get('notes', ''),
                 task.get('permalink_url', ''),
                 custom_fields_json,
-                datetime.now().isoformat()
+                current_run_time  # 🔑 關鍵：使用當前執行時間
             ))
 
         conn.commit()
         conn.close()
+
+    def _is_due_date_change_after_last_update(self, task_gid: str, old_due_on: str, new_due_on: str, last_processed_time: datetime) -> bool:
+        """檢查 due date 變更是否在上次處理之後發生"""
+        stories = self.get_task_stories(task_gid)
+        
+        for story in sorted(stories, key=lambda x: x.get('created_at', ''), reverse=True):
+            if story.get('resource_subtype') == 'due_date_changed':
+                try:
+                    story_time = datetime.fromisoformat(story.get('created_at', '').replace('Z', '+00:00'))
+                    # 如果這個變更在上次處理之後發生，就是新的變更
+                    if story_time > last_processed_time:
+                        return True
+                except:
+                    continue
+        
+        return False
+
+    def _is_delay_reason_change_after_last_update(self, task_gid: str, new_reason: str, last_processed_time: datetime) -> bool:
+        """檢查 delay reason 變更是否在上次處理之後發生"""
+        stories = self.get_task_stories(task_gid)
+        
+        for story in sorted(stories, key=lambda x: x.get('created_at', ''), reverse=True):
+            if (story.get('resource_subtype') == 'enum_custom_field_changed' and 
+                story.get('custom_field', {}).get('name', '').lower().find('delay reason') != -1):
+                
+                new_enum = story.get('new_enum_value', {})
+                if new_enum and new_enum.get('name') == new_reason:
+                    try:
+                        story_time = datetime.fromisoformat(story.get('created_at', '').replace('Z', '+00:00'))
+                        # 如果這個變更在上次處理之後發生，就是新的變更
+                        if story_time > last_processed_time:
+                            return True
+                    except:
+                        continue
+        
+        return False
 
     def _handle_due_date_delay(self, cursor, task: Dict, task_gid: str, old_due_on: str, new_due_on: str, assignee_name: str, custom_fields: List[Dict]):
         """處理 due date 延後的邏輯"""
