@@ -3,7 +3,7 @@
 
 import requests
 
-WEBHOOK_URL = "https://delay-catcher-tmx.fly.dev/webhook"
+WEBHOOK_URL = "https://smee.io/A0dgzMFOtU8aiPhu"
 
 print("🧪 測試不同的 handshake 方法...")
 print("=" * 50)
