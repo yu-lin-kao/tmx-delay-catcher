@@ -23,7 +23,7 @@ import json
 import time
 import random
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import timezone
 
 DB_PATH = "asana_tasks.db"
@@ -60,7 +60,7 @@ class AsanaManager:
 
         Notes:
         - We leave existing unused tables (if any) untouched; safe to DROP offline if desired.
-        - A defensive ALTER is issued to ensure `is_delay` exists in due_date_updates.
+        - A defensive ALTER is issued to ensure is_delay exists in due_date_updates.
         """
 
         conn = sqlite3.connect(DB_PATH)
@@ -144,11 +144,14 @@ class AsanaManager:
 
     def _asana_request(self, method: str, url: str, *, params=None, json=None, max_retries: int = 5, timeout: int = 15):
         """
-        Unified Asana request with retry/backoff.
-        - Retries on: 429 (rate limit), 5xx (server errors), and network exceptions.
-        - Honors 'Retry-After' if provided on 429; otherwise uses exponential backoff with jitter.
-        - Returns the last Response on success or final failure; may return None on hard exceptions.
+        Wrapper for Asana API requests with retry and backoff logic.
+
+        Behavior:
+        - Retries on: 429 (rate limit), 5xx (server errors), or network exceptions
+        - Honors 'Retry-After' on 429; otherwise uses exponential backoff with jitter
+        - Returns the last valid response, or None if all attempts fail
         """
+
         attempt = 0
         backoff_base = 1.0     # seconds
         backoff_cap = 30.0     # max sleep seconds
@@ -206,13 +209,13 @@ class AsanaManager:
         Fetch ALL tasks for a project with selected fields.
 
         Pagination:
-        - Iterates through all pages using Asana's `next_page.offset` until no more pages remain.
+        - Iterates through all pages using Asana's next_page.offset until no more pages remain.
         - Requests up to 100 tasks per page to reduce round-trips.
 
         Reliability:
-        - All calls go through `_asana_request()`, which retries on 429/5xx and network errors,
-        honors `Retry-After` when present, and uses exponential backoff with jitter.
-        - If repeated failures exceed `max_retries`, the loop aborts early and returns the tasks
+        - All calls go through _asana_request(), which retries on 429/5xx and network errors,
+        honors Retry-After when present, and uses exponential backoff with jitter.
+        - If repeated failures exceed max_retries, the loop aborts early and returns the tasks
         collected so far; a warning is logged.
 
         Returns:
@@ -268,7 +271,7 @@ class AsanaManager:
     def update_project_data(self, project_gid: str):
         """
         Pull the latest tasks → detect and persist changes → log to Google Sheet (best-effort).
-        This is the main entry point invoked by `main()`.
+        This is the main entry point invoked by main().
         """
         tasks = self.get_project_tasks(project_gid)
         self.save_tasks_to_db(tasks, project_gid)
@@ -283,7 +286,7 @@ class AsanaManager:
         - other cases        → not a delay
 
         Format assumption:
-        - Compare ISO dates from Asana `due_on` (YYYY-MM-DD). If you switch to `due_at` (with time/UTC),
+        - Compare ISO dates from Asana due_on (YYYY-MM-DD). If you switch to due_at (with time/UTC),
           adjust parsing accordingly (e.g., handle 'Z' and timezone offsets).
         """
         if old and not new:
@@ -383,40 +386,40 @@ class AsanaManager:
             print(f"❌ Failed to fetch task {task_gid} for updated fields.")
             return None
 
-    def increment_delay_count(self, task_gid: str, custom_fields: List[Dict]):
+    def increment_delay_count(self, task_gid: str, custom_fields: List[Dict]) -> Tuple[List[Dict], Optional[str]]:
         """
-        Increment the numeric 'Delay Count' custom field by 1.
+        Increment the numeric 'Delay Count' by 1 and (if missing) auto-set Delay Reason to 'Awaiting identify'.
 
-        Notes:
-        - Compute the new value from the caller-provided `custom_fields` snapshot,
-          then update the task. The final value is confirmed later in `_log_to_spreadsheet`
-          via a fresh `get_task_by_gid` call.
-        - If the task has no 'Delay Reason', we call `set_delay_reason_awaiting`.
-        - No retry/backoff on non-200 responses; errors are logged.
+        Returns:
+            (updated_custom_fields, auto_reason_set)
+            - updated_custom_fields: latest fields from Asana after update
+            - auto_reason_set: 'Awaiting identify' if we auto-set it this round, else None
         """
+        auto_reason_set = None
 
         field_gid = self.extract_delay_count_field_gid(custom_fields)
         if not field_gid:
             print(f"No Delay Count field found in task {task_gid}")
-            return
+            return custom_fields, None
 
         current_value = self.get_current_delay_count(custom_fields)
-        payload = {
-            "data": {
-                "custom_fields": {
-                    field_gid: current_value + 1
-                }
-            }
-        }
+        payload = {"data": {"custom_fields": {field_gid: current_value + 1}}}
         response = self._asana_request("PUT", f"{BASE_URL}/tasks/{task_gid}", json=payload)
         if not response or response.status_code != 200:
-            print(f"❌ Failed to update delay count for {task_gid}. Status: {response.status_code}")
+            print(f"❌ Failed to update delay count for {task_gid}. Status: {response.status_code if response else 'N/A'}")
         else:
             print(f"✅ Delay Count incremented for task {task_gid}")
 
-        # If delay reason is not provided, automatically fill in "Awaiting identify".
+        # Auto-set reason if missing
         if not self.has_delay_reason(custom_fields):
             self.set_delay_reason_awaiting(task_gid, custom_fields)
+            auto_reason_set = "Awaiting identify"
+
+        # Re-fetch latest fields so caller can use them in the same cycle
+        refreshed = self.get_task_by_gid(task_gid)
+        updated_fields = refreshed.get('custom_fields', []) if refreshed else custom_fields
+        return updated_fields, auto_reason_set
+
 
     def post_to_sheet(self, payload: Dict):
         """
@@ -440,16 +443,16 @@ class AsanaManager:
         Persist the latest snapshot of tasks and detect changes.
 
         Workflow per task:
-        1) Read prior snapshot (due_on + custom_fields JSON) from `tasks`
+        1) Read prior snapshot (due_on + custom_fields JSON) from tasks
         2) Determine:
-           - due_date_changed (and whether it's a "delay")
-           - delay_reason_changed (enum value actually changed)
+        - due_date_changed (and whether it's a "delay")
+        - delay_reason_changed (enum value actually changed)
         3) If any change:
-           - Write to due_date_updates / delay_reason_updates, with dedup checks
-           - Increment delay count (only for delays)
-           - Log a single merged entry to the spreadsheet (change_type can be 'due_date_change',
-             'delay_reason_change', or 'due_date_change+delay_reason_change')
-        4) Upsert the `tasks` snapshot
+        - Write to due_date_updates / delay_reason_updates, with dedup checks
+        - Increment delay count (only for delays)
+        - Log a single merged entry to the spreadsheet (change_type can be 'due_date_change',
+            'delay_reason_change', or 'due_date_change+delay_reason_change')
+        4) Upsert the tasks snapshot
 
         Notes:
         - Dedup is by (task_gid, old_due_on, new_due_on) or (task_gid, old_reason, new_reason)
@@ -467,7 +470,6 @@ class AsanaManager:
             assignee_name = assignee['name'] if assignee and 'name' in assignee else 'Unassigned'
             new_due_on = task.get('due_on', '')
             custom_fields = task.get('custom_fields', [])
-            custom_fields_json = json.dumps(custom_fields)
             
             # Get the current delay reason
             current_delay_reason = self.get_current_delay_reason(custom_fields)
@@ -475,31 +477,38 @@ class AsanaManager:
             # Check old data
             cursor.execute('SELECT due_on, custom_fields FROM tasks WHERE gid = ?', (task_gid,))
             existing = cursor.fetchone()
-            old_due_on = existing[0] if existing else ''
-            old_custom_fields_json = existing[1] if existing else ''
             
-            # Parse the old delay reason
-            old_delay_reason = ""
-            if old_custom_fields_json:
-                try:
-                    old_custom_fields = json.loads(old_custom_fields_json)
-                    old_delay_reason = self.get_current_delay_reason(old_custom_fields) or ""
-                except:
-                    old_delay_reason = ""
+            if not existing:
+                # New task: Create a baseline record without triggering change detection
+                print(f"📝 New task baseline: {task['name']}")
+                # Skip change detection and go straight to recording the update
+            else:
+                # Existing task: Normal change detection logic
+                old_due_on = existing[0] if existing else ''
+                old_custom_fields_json = existing[1] if existing else ''
+                
+                # Parse the old delay reason
+                old_delay_reason = ""
+                if old_custom_fields_json:
+                    try:
+                        old_custom_fields = json.loads(old_custom_fields_json)
+                        old_delay_reason = self.get_current_delay_reason(old_custom_fields) or ""
+                    except:
+                        old_delay_reason = ""
 
-            # Mark whether there is a change
-            due_date_changed = old_due_on != new_due_on and self.is_due_date_delayed(old_due_on, new_due_on)
-            delay_reason_changed = old_delay_reason != (current_delay_reason or "") and current_delay_reason
-            # `delay_reason_changed` will be either False or a truthy string (the new reason).
-            # Rely on Python truthiness for the subsequent if; this improves readability of the condition.
+                # Mark whether there is a change
+                due_date_changed = old_due_on != new_due_on and self.is_due_date_delayed(old_due_on, new_due_on)
+                delay_reason_changed = old_delay_reason != (current_delay_reason or "") and current_delay_reason
+                
+                # # Handle changes (merge logic): if both due date and reason changed, log as a single row to the spreadsheet
+                if due_date_changed or delay_reason_changed:
+                    self._handle_combined_changes(cursor, task, task_gid, old_due_on, new_due_on, 
+                                                old_delay_reason, current_delay_reason, assignee_name, 
+                                                custom_fields, due_date_changed, delay_reason_changed)
             
-            # Handle changes (merge logic) - Handle changes together so we can log one combined spreadsheet row when both happened simultaneously.
-            if due_date_changed or delay_reason_changed:
-                self._handle_combined_changes(cursor, task, task_gid, old_due_on, new_due_on, 
-                                            old_delay_reason, current_delay_reason, assignee_name, 
-                                            custom_fields, due_date_changed, delay_reason_changed)
+            custom_fields_json = json.dumps(custom_fields)
 
-            # Update or insert task data 
+            # Update or insert task data
             cursor.execute('''
                 INSERT OR REPLACE INTO tasks 
                 (gid, name, project_gid, assignee_name, completed, completed_at, created_at, 
@@ -528,19 +537,19 @@ class AsanaManager:
                                old_delay_reason: str, new_delay_reason: str, assignee_name: str, 
                                custom_fields: List[Dict], due_date_changed: bool, delay_reason_changed: bool):
         """
-        Insert change records with dedup and orchestrate side effects.
+        Insert change records and orchestrate related side effects.
 
+        Includes:
         - Due date changes:
-          * Insert into due_date_updates with is_delay=1 only when new > old (or when removed)
-          * Increment the task's Delay Count custom field
+        * Log to `due_date_updates` with `is_delay=1` if due date was extended or removed
+        * Increment "Delay Count" custom field
         - Delay reason changes:
-          * Insert into delay_reason_updates with who/when from stories (fallback to task metadata)
+        * Log to `delay_reason_updates` using latest story metadata (fallback to task.modified_by)
         - Spreadsheet:
-          * Emit a single merged row to avoid double-logging if both changed at once
+        * Merge into a single entry if both due date and reason changed in the same run
 
-        Caveat:
-        - "who/when" is derived from the latest relevant story; if none is found, fall back to task.modified_at/modified_by.
-          That fallback may not precisely represent the specific field change.
+        Note:
+        - "Who/When" is determined from the most recent relevant story. If none is found, falls back to `modified_at` and `modified_by`.
         """
         
         change_types = []
@@ -563,8 +572,17 @@ class AsanaManager:
                     VALUES (?, ?, ?, ?, ?)
                 ''', (task_gid, old_due_on, new_due_on, modifier_info['updated_at'], 1))
 
-                self.increment_delay_count(task_gid, custom_fields)
+                # Increment the Delay Count and auto-fill the Reason if needed
+                updated_fields, auto_reason = self.increment_delay_count(task_gid, custom_fields)
+                custom_fields = updated_fields  # Use the post‑fill fields (including the reason)
+
+                # If there was no reason originally and it was auto-filled this round → also treat it as a delay_reason_change.
+                if auto_reason and not delay_reason_changed:
+                    new_delay_reason = auto_reason
+                    delay_reason_changed = True
+
                 change_types.append("due_date_change")
+
 
         # 2. Handle delay reason changes
         if delay_reason_changed:
@@ -597,6 +615,9 @@ class AsanaManager:
             
             combined_change_type = "+".join(change_types)
             self._log_to_spreadsheet(cursor, task, task_gid, modifier_info, combined_change_type)
+
+        # Have the caller write back the latest version when save_tasks_to_db is invoked
+        task['custom_fields'] = custom_fields    
 
     def _log_to_spreadsheet(self, cursor, task: Dict, task_gid: str, modifier_info: Dict, change_type: str):
         """
@@ -868,6 +889,6 @@ if __name__ == "__main__":
 # - Ensure only one instance runs (systemd service with Restart=always; no duplicate processes)
 # - Provide .env with ASANA_TOKEN / ASANA_TMX_PROJECT_ID / SHEET_WEBHOOK_URL
 #    - If tracking another project: Change ASANA_TMX_PROJECT_ID to other project's GID and update any "tmx" labels if used elsewhere
-# - Logs are stdout; use `journalctl -u <service>` to follow
+# - Logs are stdout; use journalctl -u <service> to follow
 
 # NUC with systemd 250809 o/
