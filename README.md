@@ -7,17 +7,15 @@ TL;DR: This script runs on NUC, polls Asana for due date / delay reason changes,
 source .venv/bin/activate && python events_poller.py
 ```
 
-This is a little automation tool to track task delays in an Asana project.
+This is a little automation tool to track task delays in an Asana project, currently running on the ES NUC qwq
 
 Using the Asana API, it monitors changes to the task **due date** and **delay reason**, and reacts accordingly:
 * When a task’s due date is postponed (or removed → meaning "Parked"), it **automatically increments the "Delay Count"** field on the task and **logs a record to a Google Sheet** for later analysis.
 * When the delay reason is updated, it **logs a record to a Google Sheet** for later analysis.
 * If a delay occurs but no delay reason is filled in, it **automatically adds `Awaiting identify`** to help prompt follow-up.
+
 -> Google Sheet lives here: [https://docs.google.com/spreadsheets/d/10Xs4ChRlKc\_U737Z7R5nUQBdPtMHexhePv7kQ5YuTa4/edit?usp=sharing](https://docs.google.com/spreadsheets/d/10Xs4ChRlKc_U737Z7R5nUQBdPtMHexhePv7kQ5YuTa4/edit?usp=sharing)
 
-Currently this is **running long-term on the ES NUC**, with flexible reuse for other projects. You can also try deploying it on **fly.io** (but read about the caveats below 👀).
-
----
 
 ## Table of Contents
 
@@ -25,9 +23,8 @@ Currently this is **running long-term on the ES NUC**, with flexible reuse for o
 2. [Structure](#2-structure)
 3. [NUC Operations](#3-nuc-operations)
 4. [Future Improvements](#4-future-improvements)
-5. [Pitfalls & Gotchas qwq](#5-pitfalls--gotchas-qwq)
+5. [Experience for references qwq](#5-experience-for-references-qwq)
 
----
 
 ## 1. Notes & Requirements
 
@@ -50,7 +47,6 @@ Currently this is **running long-term on the ES NUC**, with flexible reuse for o
 
 * We use `due_on` (date-only), not `due_at` (datetime), so timezone or sub-day precision isn't supported yet.
 
----
 
 ## 2. Structure
 
@@ -120,7 +116,7 @@ delay_catcher_tmx.py
 * Set up a GitHub Actions workflow to auto-deploy updates to Fly.io.
 * Once running, Fly.io directly receives Asana webhook pushes—no long polling needed.
 
----
+
 
 ## 3. NUC Operations
 
@@ -143,7 +139,7 @@ sudo systemctl restart delay-poller.service
 tail -F logs/poller.out.log
 tail -F logs/poller.err.log
 ```
----
+
 
 ## 4. Future Improvements
 
@@ -168,7 +164,7 @@ tail -F logs/poller.err.log
     * Optionally export Prometheus metrics (e.g. delay count trends)
     * At minimum, support journalctl log scanning for alert keywords
 
----
+
 
 ## 5. Experience for references qwq
 
@@ -229,8 +225,8 @@ Expect more bots/automation coming up, so we’re looking for an unrestricted pl
 * GAS has quota limits — batch writes where possible
 * Keep sheet schema stable; if changed, update both code + README
 * Add shared_secret field in payload and validate it server-side for basic auth
----
 
+---
 End of README, back to catching delays!
 May your delays be rare, and your delay reasons always make sense qwq
 If you spot a bug or have ideas, drop me (@yu-lin-kao) a message – this little catcher is always happy to learn o/
