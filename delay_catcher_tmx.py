@@ -20,6 +20,8 @@ import argparse
 import sqlite3
 import requests
 import json
+import time
+import random
 from datetime import datetime
 from typing import List, Dict, Optional
 from datetime import timezone
@@ -138,23 +140,110 @@ class AsanaManager:
     #     conn.close()
     #     return projects
 
+
+
+    def _asana_request(self, method: str, url: str, *, params=None, json=None, max_retries: int = 5, timeout: int = 15):
+        """
+        Unified Asana request with retry/backoff.
+        - Retries on: 429 (rate limit), 5xx (server errors), and network exceptions.
+        - Honors 'Retry-After' if provided on 429; otherwise uses exponential backoff with jitter.
+        - Returns the last Response on success or final failure; may return None on hard exceptions.
+        """
+        attempt = 0
+        backoff_base = 1.0     # seconds
+        backoff_cap = 30.0     # max sleep seconds
+
+        while True:
+            try:
+                resp = requests.request(
+                    method,
+                    url,
+                    headers=self.headers,
+                    params=params,
+                    json=json,
+                    timeout=timeout,
+                )
+
+                # Success
+                if 200 <= resp.status_code < 300:
+                    return resp
+
+                # Rate limited
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        wait = float(retry_after)
+                    else:
+                        wait = min(backoff_base * (2 ** attempt), backoff_cap)
+                    wait += random.random() * 0.3  # small jitter
+                    print(f"⚠️ 429 rate-limited. Waiting {wait:.1f}s before retry...")
+                # Server errors
+                elif 500 <= resp.status_code < 600:
+                    wait = min(backoff_base * (2 ** attempt), backoff_cap)
+                    wait += random.random() * 0.5
+                    print(f"⚠️ Server error {resp.status_code}. Waiting {wait:.1f}s before retry...")
+                else:
+                    # Other 4xx: do not retry (usually caller/permission issue)
+                    return resp
+
+            except requests.exceptions.RequestException as e:
+                # Network-level issue: retry with backoff
+                wait = min(backoff_base * (2 ** attempt), backoff_cap)
+                wait += random.random() * 0.5
+                print(f"⚠️ Network error: {e}. Waiting {wait:.1f}s before retry...")
+
+            # Exceeded retries?
+            attempt += 1
+            if attempt > max_retries:
+                print("❌ Max retries exceeded.")
+                return resp if 'resp' in locals() else None
+
+            time.sleep(wait)
+
+
     def get_project_tasks(self, project_gid: str) -> List[Dict]:
         """
-        Fetch tasks for a project with selected fields.
-        - This fetches a single page only (no pagination). If your project exceeds the default page size,
-          you may miss tasks. Consider implementing offset-based pagination if needed.
-        - Request `custom_fields` on tasks so downstream functions can compute delay count/reason.
-        """
+        Fetch ALL tasks for a project with selected fields.
 
+        Pagination:
+        - Iterates through all pages using Asana's `next_page.offset` until no more pages remain.
+        - Requests up to 100 tasks per page to reduce round-trips.
+
+        Reliability:
+        - All calls go through `_asana_request()`, which retries on 429/5xx and network errors,
+        honors `Retry-After` when present, and uses exponential backoff with jitter.
+        - If repeated failures exceed `max_retries`, the loop aborts early and returns the tasks
+        collected so far; a warning is logged.
+
+        Returns:
+        - List[Dict]: concatenated tasks from all fetched pages (may be partial on persistent failures).
+        """
+        collected: List[Dict] = []
         params = {
-            "opt_fields": "gid,name,assignee.name,completed,completed_at,created_at,modified_at,due_on,notes,permalink_url,custom_fields"
+            "opt_fields": "gid,name,assignee.name,completed,completed_at,created_at,modified_at,due_on,notes,permalink_url,custom_fields",
+            "limit": 100  # ask for more per page to reduce API calls
         }
-        response = requests.get(f"{BASE_URL}/projects/{project_gid}/tasks", headers=self.headers, params=params)
-        if response.status_code == 200:
-            return response.json()['data']
-        else:
-            print(f"Failed to fetch tasks. Status code: {response.status_code}")
-            return []
+
+        while True:
+            resp = self._asana_request("GET", f"{BASE_URL}/projects/{project_gid}/tasks", params=params)
+            if not resp or resp.status_code != 200:
+                print(f"Failed to fetch tasks. Status code: {resp.status_code if resp else 'N/A'}")
+                break
+            body = resp.json()
+
+            data = body.get("data", [])
+            collected.extend(data)
+
+            next_page = body.get("next_page")
+            if next_page and next_page.get("offset"):
+                # set offset for the next page
+                params["offset"] = next_page["offset"]
+            else:
+                # no more pages
+                break
+
+        return collected
+
 
     def get_task_stories(self, task_gid: str) -> List[Dict]:
         """
@@ -170,12 +259,11 @@ class AsanaManager:
         params = {
             "opt_fields": "resource_subtype,custom_field.name,old_enum_value.name,new_enum_value.name,created_at,created_by.name"
         }
-        response = requests.get(f"{BASE_URL}/tasks/{task_gid}/stories", headers=self.headers, params=params)
-        if response.status_code == 200:
-            return response.json()['data']
-        else:
-            print(f"Failed to fetch stories for task {task_gid}")
-            return []
+        resp = self._asana_request("GET", f"{BASE_URL}/tasks/{task_gid}/stories", params=params)
+        if resp and resp.status_code == 200:
+            return resp.json().get('data', [])
+        print(f"Failed to fetch stories for task {task_gid}")
+        return []
 
     def update_project_data(self, project_gid: str):
         """
@@ -258,8 +346,8 @@ class AsanaManager:
 
                 if not enum_options:
                     # If options are not included in the task API response, re-fetch the field information.
-                    field_resp = requests.get(f"{BASE_URL}/custom_fields/{field_gid}", headers=self.headers)
-                    if field_resp.status_code == 200:
+                    field_resp = self._asana_request("GET", f"{BASE_URL}/custom_fields/{field_gid}")
+                    if field_resp and field_resp.status_code == 200:
                         enum_options = field_resp.json().get('data', {}).get('enum_options', [])
                     else:
                         print(f"❌ Failed to fetch enum options for delay reason (field_gid={field_gid})")
@@ -275,7 +363,7 @@ class AsanaManager:
                                 }
                             }
                         }
-                        response = requests.put(f"{BASE_URL}/tasks/{task_gid}", headers=self.headers, json=payload)
+                        response = self._asana_request("PUT", f"{BASE_URL}/tasks/{task_gid}", json=payload)
                         if response.status_code == 200:
                             print(f"🟡 Set delay reason to 'Awaiting identify' for task {task_gid}")
                         else:
@@ -288,9 +376,9 @@ class AsanaManager:
         This helps ensure we log consistent, current values to the Google Sheet.
         """
 
-        response = requests.get(f"{BASE_URL}/tasks/{task_gid}?opt_fields=custom_fields", headers=self.headers)
-        if response.status_code == 200:
-            return response.json().get('data')
+        resp = self._asana_request("GET", f"{BASE_URL}/tasks/{task_gid}", params={"opt_fields": "custom_fields"})
+        if resp and resp.status_code == 200:
+            return resp.json().get('data')
         else:
             print(f"❌ Failed to fetch task {task_gid} for updated fields.")
             return None
@@ -320,8 +408,8 @@ class AsanaManager:
                 }
             }
         }
-        response = requests.put(f"{BASE_URL}/tasks/{task_gid}", headers=self.headers, json=payload)
-        if response.status_code != 200:
+        response = self._asana_request("PUT", f"{BASE_URL}/tasks/{task_gid}", json=payload)
+        if not response or response.status_code != 200:
             print(f"❌ Failed to update delay count for {task_gid}. Status: {response.status_code}")
         else:
             print(f"✅ Delay Count incremented for task {task_gid}")
@@ -592,8 +680,8 @@ class AsanaManager:
                 }
         
         # If no due date change record is found, try to get the modifier info from the task itself
-        task_response = requests.get(f"{BASE_URL}/tasks/{task_gid}?opt_fields=modified_at,modified_by.name", headers=self.headers)
-        if task_response.status_code == 200:
+        task_response = self._asana_request("GET", f"{BASE_URL}/tasks/{task_gid}", params={"opt_fields":"modified_at,modified_by.name"})
+        if task_response and task_response.status_code == 200:
             task_data = task_response.json().get('data', {})
             modified_by = task_data.get('modified_by', {})
             return {
@@ -633,8 +721,8 @@ class AsanaManager:
                     }
         
         # If no corresponding change record is found, try to get the modifier info from the task itself.
-        task_response = requests.get(f"{BASE_URL}/tasks/{task_gid}?opt_fields=modified_at,modified_by.name", headers=self.headers)
-        if task_response.status_code == 200:
+        task_response = self._asana_request("GET", f"{BASE_URL}/tasks/{task_gid}", params={"opt_fields":"modified_at,modified_by.name"})
+        if task_response and task_response.status_code == 200:
             task_data = task_response.json().get('data', {})
             modified_by = task_data.get('modified_by', {})
             return {
@@ -761,7 +849,7 @@ def main():
     # project_gid = projects[choice]['gid']
     
     # Single-project mode:
-    # Itentionally ignore any project list and rely on ASANA_TMX_PROJECT_ID for now.
+    # Intentionally ignore any project list and rely on ASANA_TMX_PROJECT_ID for now.
     project_gid = os.getenv("ASANA_TMX_PROJECT_ID")
 
     print("\nAuto-running: Update Asana data...\n")
@@ -779,7 +867,7 @@ if __name__ == "__main__":
 # Deployment note:
 # - Ensure only one instance runs (systemd service with Restart=always; no duplicate processes)
 # - Provide .env with ASANA_TOKEN / ASANA_TMX_PROJECT_ID / SHEET_WEBHOOK_URL
-#    - If tracking another project: Change ASANA_TMX_PROJECT_ID to other project's gid and change all "tmx" mark
+#    - If tracking another project: Change ASANA_TMX_PROJECT_ID to other project's GID and update any "tmx" labels if used elsewhere
 # - Logs are stdout; use `journalctl -u <service>` to follow
 
 # NUC with systemd 250809 o/
