@@ -44,8 +44,8 @@ Using the Asana API, it monitors changes to the task **due date** and **delay re
 
 * **Database baseline was created on 2025/08/09** → delay records start from that date.
   > Asana stories API tells us *that* `due_on` changed, but **not exactly when** -> Infer delays by comparing snapshots.
-
 * We use `due_on` (date-only), not `due_at` (datetime), so timezone or sub-day precision isn't supported yet.
+* "Awaiting Identification" is added because Asana views couldn't filter by Numbers(Delay counts). Currently using "Delay reason not empty" as filter for Asana "DelayList" View.
 
 
 ## 2. Structure
@@ -149,6 +149,7 @@ tail -F logs/poller.err.log
 2. Future visualization suggestions
     * Retrieve the Teams (custom field) from Asana and log it to db.
     * Update computed values (first_due_on, last_due_on, delay_duration) to DB (or compute afterward from the DB, depend on convenience).
+    * Link could be generated with simple structure with gids(workspace, projext, task)
     * Enable direct, real-time visualization from the DB
 3. Updated_at timestamp improvement: Not standardized yet since ES is cross time-zone.
     * Consider converting updated_at to a unified timezone later
