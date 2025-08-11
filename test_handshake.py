@@ -1,31 +1,30 @@
-#!/usr/bin/env python3
-# test_handshake.py - 測試不同的 handshake 格式
+# test_handshake.py - Test different handshake formats
 
 import requests
 
-WEBHOOK_URL = "https://smee.io/A0dgzMFOtU8aiPhu"
+WEBHOOK_URL = "https://delay-catcher-tmx.fly.dev/webhook"
 
-print("🧪 測試不同的 handshake 方法...")
+print(" Testing different handshake formats...")
 print("=" * 50)
 
-# 測試 1: GET 請求 + X-Hook-Secret
-print("1. 測試 GET 請求 + X-Hook-Secret")
+# Test 1: GET request + X-Hook-Secret
+print("Test 1: GET request + X-Hook-Secret")
 response = requests.get(WEBHOOK_URL, headers={"X-Hook-Secret": "test_secret_get"})
 print(f"   Status: {response.status_code}")
 print(f"   Response: {response.text}")
 print(f"   Content-Type: {response.headers.get('content-type', 'N/A')}")
 print()
 
-# 測試 2: POST 請求 + X-Hook-Secret (空 body)
-print("2. 測試 POST 請求 + X-Hook-Secret (空 body)")
+# Test 2: POST request + X-Hook-Secret (empty)
+print("Test 2: POST request + X-Hook-Secret (empty)")
 response = requests.post(WEBHOOK_URL, headers={"X-Hook-Secret": "test_secret_post"})
 print(f"   Status: {response.status_code}")
 print(f"   Response: {response.text}")
 print(f"   Content-Type: {response.headers.get('content-type', 'N/A')}")
 print()
 
-# 測試 3: POST 請求 + X-Hook-Secret + JSON body
-print("3. 測試 POST 請求 + X-Hook-Secret + JSON body")
+# Test 3: POST request + X-Hook-Secret + JSON body
+print("Test 3: POST request + X-Hook-Secret + JSON body")
 response = requests.post(
     WEBHOOK_URL, 
     headers={
@@ -39,8 +38,8 @@ print(f"   Response: {response.text}")
 print(f"   Content-Type: {response.headers.get('content-type', 'N/A')}")
 print()
 
-# 測試 4: POST 請求 + X-Hook-Secret + 模擬 Asana 格式
-print("4. 測試 POST 請求 + X-Hook-Secret + 模擬 Asana 註冊格式")
+# Test 4: POST request + X-Hook-Secret + simulated Asana format
+print("Test 4: POST request + X-Hook-Secret + simulated Asana format")
 response = requests.post(
     WEBHOOK_URL,
     headers={
@@ -55,4 +54,4 @@ print(f"   Response: {response.text}")
 print(f"   Content-Type: {response.headers.get('content-type', 'N/A')}")
 print()
 
-print("✅ 測試完成!")
+print("✅ Test complete!")

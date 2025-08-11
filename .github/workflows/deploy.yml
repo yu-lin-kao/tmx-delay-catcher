@@ -25,7 +25,7 @@ jobs:
       - name: Install Fly CLI
         run: |
           curl -L https://fly.io/install.sh | sh
-          echo "$HOME/.fly/bin" >> $GITHUB_PATH  # ✅ 正確設 PATH，否則下一步會找不到 flyctl
+          echo "$HOME/.fly/bin" >> $GITHUB_PATH  # Set the PATH correctly, otherwise the next step will not find flyctl.
 
       - name: Deploy to Fly.io
         env:

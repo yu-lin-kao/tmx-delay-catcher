@@ -1,16 +1,15 @@
-#!/usr/bin/env python3
 import os, time, requests, sqlite3, traceback
-from delay_catcher_tmx import main as run_delay_catcher  # 你原來的主處理
+from delay_catcher_tmx import main as run_delay_catcher  # Original main handler
 from threading import Timer, Lock
 
-DEBOUNCE_SEC = float(os.getenv("DEBOUNCE_SEC", "1.5"))  # 可用 .env 覆寫，預設 1.5 秒
-_fire_timer = None   # 全域計時器
-_fire_lock = Lock()  # 保護計時器的鎖
+DEBOUNCE_SEC = float(os.getenv("DEBOUNCE_SEC", "1.5"))  # Can be overridden by .env, default is 1.5 seconds.
+_fire_timer = None   # Global timer
+_fire_lock = Lock()  # Lock to protect the timer
 
 ASANA_TOKEN  = os.getenv("ASANA_TOKEN")
 PROJECT_GID  = os.getenv("ASANA_TMX_PROJECT_ID")
 DB_PATH      = os.getenv("EVENTS_DB_PATH", "asana_events.db")
-POLL_TIMEOUT = int(os.getenv("POLL_TIMEOUT_SEC", "30"))  # 長輪詢等待秒數（秒）
+POLL_TIMEOUT = int(os.getenv("POLL_TIMEOUT_SEC", "30"))  # Long polling wait time (seconds)
 VERBOSE      = os.getenv("LOG_VERBOSE", "0") == "1"
 
 HEADERS = {"Authorization": f"Bearer {ASANA_TOKEN}"}
@@ -40,17 +39,17 @@ def fetch_events(conn, sync_token=None):
 
     r = requests.get(url, headers=HEADERS, params=params, timeout=POLL_TIMEOUT + 10)
 
-    # ✅ 關鍵修正：第一次/過期時 412，回應 body 會附上新的 sync token
+    # On first run/expiration, a 412 response will include a new sync token in the response body.
     if r.status_code == 412:
         try:
             payload = r.json()
             new_sync = payload.get("sync")
             if new_sync:
-                set_sync(conn, new_sync)   # 存起來
-                return [], new_sync, None  # 沒事件很正常，拿到 token 即可
+                set_sync(conn, new_sync)   # Save it
+                return [], new_sync, None  # No events is normal, just get the token
         except Exception:
             pass
-        # 萬一沒有拿到（理論上不會），再要求重置
+        # If not obtained (should not happen), request a reset
         return [], None, "RESET"
 
     r.raise_for_status()
@@ -61,8 +60,8 @@ def fetch_events(conn, sync_token=None):
 
 def is_relevant(ev):
     """
-    只處理 due_on/due_at 變更，或 Delay Reason 自訂欄位變更。
-    排除 Delay Count（數字欄位）避免自觸發。
+    Only handle changes to due_on/due_at or the Delay Reason custom field.
+    Exclude Delay Count (number field) to avoid self-triggering.
     """
     ch = (ev.get("change") or {})
     field = ch.get("field")
@@ -70,8 +69,8 @@ def is_relevant(ev):
         return True
 
     if field == "custom_fields":
-        target_reason_gid = os.getenv("DELAY_REASON_FIELD_GID")  # 建議設定
-        delay_count_gid   = os.getenv("DELAY_COUNT_FIELD_GID")   # 必填以排除
+        target_reason_gid = os.getenv("DELAY_REASON_FIELD_GID") 
+        delay_count_gid   = os.getenv("DELAY_COUNT_FIELD_GID")   # Exclude this - or it will be trigger when increment
         newv = (ch.get("new_value") or {})
         gid  = newv.get("gid")
         if delay_count_gid and gid == delay_count_gid:
@@ -81,7 +80,7 @@ def is_relevant(ev):
     return False
 
 def _do_run():
-    """Debounce 計時到時，真的執行你的主流程。"""
+    """When the debounce timer expires, execute the main process."""
     try:
         print("⏱️ Debounce elapsed, executing delay_catcher_tmx…")
         run_delay_catcher()
@@ -90,18 +89,18 @@ def _do_run():
         print("❌ Error in debounced run:", e)
 
 def schedule_run():
-    """在 DEBOUNCE_SEC 後執行；若期間又有事件，重置計時。"""
+    """Execute after DEBOUNCE_SEC; if another event occurs during this period, reset the timer."""
     global _fire_timer
     with _fire_lock:
         if _fire_timer:
-            _fire_timer.cancel()   # 先取消上一個排程
+            _fire_timer.cancel()   # Cancel the previous scheduled task first
         _fire_timer = Timer(DEBOUNCE_SEC, _do_run)
-        _fire_timer.daemon = True  # 不阻擋程式關閉
+        _fire_timer.daemon = True  # Don't block program exit
         _fire_timer.start()
 
 def main():
     if not ASANA_TOKEN or not PROJECT_GID:
-        raise RuntimeError("ASANA_TOKEN / ASANA_TMX_PROJECT_ID 未設定")
+        raise RuntimeError("ASANA_TOKEN / ASANA_TMX_PROJECT_ID not set")
 
     conn = db()
     sync_token = get_sync(conn)
@@ -111,8 +110,8 @@ def main():
         try:
             events, new_sync, flag = fetch_events(conn, sync_token)
             if new_sync and new_sync != sync_token:
-                set_sync(conn, new_sync)   # 寫回 DB
-                sync_token = new_sync      # 更新記憶體中的 token
+                set_sync(conn, new_sync)   # Write back to DB
+                sync_token = new_sync      # Update token in memory
 
             if flag == "RESET":
                 print("⚠️  Sync token reset by server. Restarting stream…")
@@ -121,7 +120,7 @@ def main():
                 time.sleep(2)
                 continue
 
-            # 初次會拿到初始 sync（沒有事件），之後才會回事件
+            # Initially gets the initial sync (no events), then returns events afterwards
             if new_sync != sync_token:
                 set_sync(conn, new_sync)
                 sync_token = new_sync
@@ -134,7 +133,7 @@ def main():
                 gids  = [e.get("resource", {}).get("gid") for e in picked]
                 kinds = [(e.get("change") or {}).get("field") for e in picked]
                 print(f"🎯 Relevant events -> tasks: {gids} fields: {kinds}")
-                # ✅ 改成排程執行（debounce），把同一波連續修改合併處理
+                # Switch to scheduled execution (debounce) to batch a burst of consecutive changes
                 schedule_run()
         except requests.RequestException as e:
             print("🌧️ Network/API error:", e)

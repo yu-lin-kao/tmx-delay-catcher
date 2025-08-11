@@ -1,25 +1,25 @@
 FROM python:3.10-slim
 
-# 安裝系統相依套件，包含 SQLite
+# Install system dependencies, including SQLite
 RUN apt-get update && apt-get install -y \
     sqlite3 \
     libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 設定工作目錄
+# Set working directory
 WORKDIR /app
 
-# 複製 requirements.txt 並安裝 Python 套件
+# Copy requirements.txt and install Python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 複製應用程式檔案
+# Copy application files
 COPY . .
 
-# 暴露端口
+# Expose port
 EXPOSE 8080
 
-# 啟動應用程式
+# Start the application
 CMD ["python", "webhook/app.py"]
 
 ENV PYTHONUNBUFFERED=1

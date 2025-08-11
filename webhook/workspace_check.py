@@ -13,82 +13,82 @@ headers = {
     "Content-Type": "application/json"
 }
 
-print("🔍 檢查 Asana 權限和工作區信息...")
+print("🔍 Checking Asana permissions and workspace information...")
 print("=" * 50)
 
-# 1. 檢查 token 是否有效
-print("1. 檢查當前用戶信息...")
+# 1. Check if the token is valid
+print("1. Check current user information...")
 user_response = requests.get("https://app.asana.com/api/1.0/users/me", headers=headers)
 print(f"Status: {user_response.status_code}")
 if user_response.status_code == 200:
     user_data = user_response.json()['data']
-    print(f"✅ 用戶: {user_data.get('name')} ({user_data.get('email')})")
+    print(f"✅ User: {user_data.get('name')} ({user_data.get('email')})")
     print(f"   GID: {user_data.get('gid')}")
 else:
-    print(f"❌ 用戶信息獲取失敗: {user_response.json()}")
+    print(f"❌ Failed to retrieve user information: {user_response.json()}")
     exit(1)
 
 print()
 
-# 2. 獲取用戶的工作區
-print("2. 獲取用戶工作區...")
+# 2. Retrieve user's workspaces
+print("2. Get user workspaces...")
 workspaces_response = requests.get("https://app.asana.com/api/1.0/workspaces", headers=headers)
 print(f"Status: {workspaces_response.status_code}")
 if workspaces_response.status_code == 200:
     workspaces = workspaces_response.json()['data']
-    print(f"✅ 找到 {len(workspaces)} 個工作區:")
+    print(f"✅ Find {len(workspaces)} workspace(s):")
     for ws in workspaces:
         print(f"   - {ws['name']} (GID: {ws['gid']})")
     
     if workspaces:
-        workspace_gid = workspaces[0]['gid']  # 使用第一個工作區
-        print(f"\n📌 將使用工作區: {workspaces[0]['name']} ({workspace_gid})")
+        workspace_gid = workspaces[0]['gid']  # Use the first workspace [0]
+        print(f"\n📌 Using workspace: {workspaces[0]['name']} ({workspace_gid})")
     else:
-        print("❌ 沒有找到任何工作區")
+        print("❌ No workspaces found.")
         exit(1)
 else:
-    print(f"❌ 工作區獲取失敗: {workspaces_response.json()}")
+    print(f"❌ Failed to retrieve workspaces: {workspaces_response.json()}")
     exit(1)
 
 print()
 
-# 3. 檢查項目信息
-print("3. 檢查項目信息...")
+# 3. Check project info
+print("3. Check project info...")
 project_response = requests.get(f"https://app.asana.com/api/1.0/projects/{PROJECT_GID}", headers=headers)
 print(f"Status: {project_response.status_code}")
 if project_response.status_code == 200:
     project_data = project_response.json()['data']
-    print(f"✅ 項目: {project_data.get('name')}")
+    print(f"✅ Project: {project_data.get('name')}")
     print(f"   GID: {project_data.get('gid')}")
-    print(f"   工作區: {project_data.get('workspace', {}).get('name')} ({project_data.get('workspace', {}).get('gid')})")
+    print(f"   Workspace: {project_data.get('workspace', {}).get('name')} ({project_data.get('workspace', {}).get('gid')})")
 else:
-    print(f"❌ 項目信息獲取失敗: {project_response.json()}")
+    print(f"❌ Failed to retrieve project info: {project_response.json()}")
     exit(1)
 
 print()
 
-# 4. 檢查該工作區中的現有 webhooks
-print("4. 檢查工作區中的現有 webhooks...")
+# 4. Check existing webhooks in the workspace
+print("4. Check existing webhooks in the workspace...")
 webhook_response = requests.get(f"https://app.asana.com/api/1.0/webhooks?workspace={workspace_gid}", headers=headers)
 print(f"Status: {webhook_response.status_code}")
 if webhook_response.status_code == 200:
     webhooks = webhook_response.json()['data']
-    print(f"✅ 找到 {len(webhooks)} 個 webhooks:")
+    print(f"✅ Found {len(webhooks)} webhooks:")
     for webhook in webhooks:
-        print(f"   - Target: {webhook.get('target')}")
-        print(f"     Resource: {webhook.get('resource', {}).get('gid')} ({webhook.get('resource', {}).get('name')})")
-        print(f"     GID: {webhook.get('gid')}")
+        print(f"   Target: {webhook.get('target')}")
+        print(f"   Resource: {webhook.get('resource', {}).get('gid')} ({webhook.get('resource', {}).get('name')})")
+        print(f"   GID: {webhook.get('gid')}")
         print()
     
-    # 刪除針對同一項目的現有 webhooks
+    # Delete existing webhooks for the same project
     for webhook in webhooks:
         if webhook.get('resource', {}).get('gid') == PROJECT_GID:
-            print(f"🗑️ 刪除現有的 webhook: {webhook['gid']}")
+            print(f" Deleting existing webhook: {webhook['gid']}")
             delete_response = requests.delete(f"https://app.asana.com/api/1.0/webhooks/{webhook['gid']}", headers=headers)
-            print(f"   刪除狀態: {delete_response.status_code}")
+            print(f" Delete status: {delete_response.status_code}")
 else:
-    print(f"❌ Webhooks 檢查失敗: {webhook_response.json()}")
+    print(f"❌ Failed to check webhooks: {webhook_response.json()}")
 
 print()
 print("=" * 50)
-print("✅ 檢查完成！現在可以嘗試註冊新的 webhook。")
+print("✅ Check complete! You can now try registering a new webhook.")

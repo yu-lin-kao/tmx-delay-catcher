@@ -26,10 +26,10 @@ def health():
 
 @app.route("/webhook", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
 def webhook():
-    # 記錄所有請求的詳細信息
+    # Log detailed information for all requests.
     import json
-    print(f"🌐 收到 {request.method} 請求到 /webhook")
-    print(f"📋 所有 Headers:")
+    print(f"🌐 Received {request.method} request to /webhook")
+    print(f"📋 All Headers:")
     for key, value in request.headers.items():
         print(f"   {key}: {value}")
     
@@ -39,7 +39,7 @@ def webhook():
     print(f"   Content Type: {request.headers.get('Content-Type', 'None')}")
     print(f"   Content Length: {request.headers.get('Content-Length', 'None')}")
     
-    # 記錄請求體（如果有的話）
+    # Log request body (if exist)
     if request.method in ['POST', 'PUT', 'PATCH']:
         try:
             if request.is_json:
@@ -51,21 +51,21 @@ def webhook():
     
     print("=" * 60)
     
-    # Asana webhook secret verification (適用於註冊時的 handshake)
+    # Asana webhook secret verification (use for registration handshake)
     if "X-Hook-Secret" in request.headers:
         secret = request.headers["X-Hook-Secret"]
-        print(f"🔐 檢測到 X-Hook-Secret: {secret}")
-        print(f"🤝 返回 handshake secret: {secret}")
+        print(f"🔐 Detected X-Hook-Secret: {secret}")
+        print(f"🤝 Returning handshake secret: {secret}")
         
         response = make_response(secret, 200)
         response.headers['Content-Type'] = 'text/plain; charset=utf-8'
         response.headers['Content-Length'] = str(len(secret))
-        response.headers['X-Hook-Secret'] = secret  # 🔑 關鍵：Asana 可能要求你 echo 回這個 header！
+        response.headers['X-Hook-Secret'] = secret  # 🔑 Important: Asana may require you to echo this header back!
         return response
     
     # Handle GET request for webhook verification
     if request.method == "GET":
-        print("✅ 處理 GET 請求 - 返回 webhook ready 狀態")
+        print("✅ Handling GET request - returning webhook ready status")
         return jsonify({"status": "webhook_ready", "message": "Webhook endpoint is ready"}), 200
     
     # Handle POST request for actual webhook data
