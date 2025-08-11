@@ -498,9 +498,9 @@ class AsanaManager:
 
                 # Mark whether there is a change
                 due_date_changed = old_due_on != new_due_on and self.is_due_date_delayed(old_due_on, new_due_on)
-                delay_reason_changed = old_delay_reason != (current_delay_reason or "") and current_delay_reason
+                delay_reason_changed = (old_delay_reason or "") != (current_delay_reason or "")
                 
-                # # Handle changes (merge logic): if both due date and reason changed, log as a single row to the spreadsheet
+                # Handle changes (merge logic): if both due date and reason changed, log as a single row to the spreadsheet
                 if due_date_changed or delay_reason_changed:
                     self._handle_combined_changes(cursor, task, task_gid, old_due_on, new_due_on, 
                                                 old_delay_reason, current_delay_reason, assignee_name, 
