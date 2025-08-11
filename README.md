@@ -1,6 +1,6 @@
 # delay\_catcher\_tmx o/
 
-Hello~! This is **delay\_catcher**, currently specifically for the TMX project version: `delay_catcher_tmx` o/
+Hello~! This is **delay\_catcher**, currently specifically for the TMx project version: `delay_catcher_tmx` o/
 
 TL;DR: This script runs on NUC, polls Asana for due date / delay reason changes, and logs them to Google Sheets. Start with:
 ```bash
