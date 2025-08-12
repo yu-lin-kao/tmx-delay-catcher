@@ -156,6 +156,7 @@ tail -F logs/poller.err.log
 4. Duplicate execution protection
     * Add deduplication logic at DB or process level (idempotency key / execution guard)
     * Prevent double-recording if multiple instances are running
+    * (A little bit too sensitive. When people select wrong and corrected, it records several rows)
 5. Multi-project support
     * Support monitoring multiple Asana projects in parallel
     * Could be via separate webhook services or multi-process handling
